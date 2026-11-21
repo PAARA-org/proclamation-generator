@@ -41,9 +41,8 @@ This repository is pre-configured for **GitHub Pages** (all asset paths are rela
    ```bash
    git push -u origin main
    ```
-2. In GitHub, open **Settings → Pages**:
-   - Under **Build and deployment → Source**, select **GitHub Actions** (recommended — uses `.github/workflows/deploy-pages.yml` to automatically refresh the offline bundle and deploy whenever `main` or `data/signatories.json` is updated), *or* select **Deploy from a branch (`main` / `/ (root)`)** (supported via `.nojekyll`).
-   - Because `PAARA-org/paara-org.github.io` uses `paara.org`, GitHub Pages will serve this project directly at **`https://paara.org/proclamation-generator/`**.
+2. In GitHub **Settings → Pages → Build and deployment → Source**, keep **Deploy from a branch** (`main` / `/ (root)`). The `.nojekyll` file in the repository root tells GitHub's built-in `pages build and deployment` action to publish the static site directly without Jekyll processing.
+   - Because `PAARA-org/paara-org.github.io` uses `paara.org`, GitHub Pages serves this project directly at **`https://paara.org/proclamation-generator/`**.
 
 ## Updating Signatories Each Year
 
