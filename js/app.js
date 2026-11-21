@@ -1,14 +1,28 @@
 /**
  * Main Application Controller — PAARA Life Membership Proclamation Generator
- * Supports both HTTP(S) hosting (GitHub Pages / paara.org) AND direct file:// double-clicking!
+ *
+ * Asynchronous, non-blocking architecture:
+ * - Zero layout or DOM work inside `input` handlers (0ms keystroke latency).
+ * - Dedicated background Web Worker (`js/render-worker.js`) for OpenType layout & pdf-lib export,
+ *   with seamless async main-thread fallback when opened directly via `file://`.
+ * - Persistent layered SVG (`#svgBorderLayer`, `#svgLogoLayer`, `#svgPhotoLayer`, `#svgTextLayer`)
+ *   so typing never rebuilds the 900+ guilloché curves or re-decodes images.
+ * - Live sequence-tracked status pill (`⟳ Catching up…` -> `✓ Caught up`).
  */
 (function () {
   'use strict';
 
-  const { THEMES, PAGE_SIZES, computeProclamationLayout, generateProclamationPdfBytes } =
-    window.PAARA;
+  const {
+    THEMES,
+    PAGE_SIZES,
+    buildThemeBorder,
+    computeProclamationLayout,
+    preparePdfImageAssets,
+    generateProclamationPdfBytes
+  } = window.PAARA;
 
   const STORAGE_KEY = 'paara_proclamation_draft_v2';
+  const STORAGE_PHOTO_KEY = 'paara_proclamation_photo_v2';
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const IS_FILE_PROTOCOL = window.location.protocol === 'file:';
 
@@ -27,7 +41,31 @@
   let currentLayout = null;
   let activeViewTab = 'live';
   let currentPdfBlobUrl = null;
-  let saveTimer = null;
+  let photoDirtyForStorage = false;
+
+  // Async pipeline state & sequence counters
+  let renderWorker = null;
+  let workerReady = false;
+  let latestChangeSeq = 0;
+  let appliedSvgSeq = 0;
+  let appliedPdfSeq = 0;
+  let layoutDebounceTimer = null;
+  let pdfDebounceTimer = null;
+  let autosaveTimer = null;
+  let pdfReqCounter = 0;
+  const pendingPdfResolvers = new Map();
+
+  // Persistent SVG & asset caches
+  let renderedBorderKey = null;
+  let logoImageEl = null;
+  let cachedLogoHref = null;
+  let cachedBorderHref = null;
+  let cachedPhotoHref = null;
+  let photoImageEl = null;
+  let photoClipRectEl = null;
+  let photoFrameRectEl = null;
+  let photoHitRectEl = null;
+  let stageSize = { width: 820, height: 740 };
 
   const state = {
     pageSize: 'legal',
@@ -138,6 +176,8 @@
     previewTablist: document.getElementById('previewTablist'),
     tabLiveBtn: document.getElementById('tabLiveBtn'),
     tabPdfBtn: document.getElementById('tabPdfBtn'),
+    syncStatusBadge: document.getElementById('syncStatusBadge'),
+    syncStatusText: document.getElementById('syncStatusText'),
     livePanel: document.getElementById('livePanel'),
     pdfPanel: document.getElementById('pdfPanel'),
     pageSpecBadge: document.getElementById('pageSpecBadge'),
@@ -145,16 +185,34 @@
     liveStage: document.getElementById('liveStage'),
     svgPageWrap: document.getElementById('svgPageWrap'),
     proclamationSvg: document.getElementById('proclamationSvg'),
+    svgTitleNode: document.getElementById('svgTitleNode'),
+    svgDefs: document.getElementById('svgDefs'),
+    svgBorderLayer: document.getElementById('svgBorderLayer'),
+    svgLogoLayer: document.getElementById('svgLogoLayer'),
+    svgTextLayer: document.getElementById('svgTextLayer'),
+    svgPhotoLayer: document.getElementById('svgPhotoLayer'),
+    svgOverlayLayer: document.getElementById('svgOverlayLayer'),
     pdfPreviewFrame: document.getElementById('pdfPreviewFrame'),
     globalDropOverlay: document.getElementById('globalDropOverlay')
   };
 
-  function resolveAssetUrl(relPath) {
-    if (!relPath) return relPath;
-    if (IS_FILE_PROTOCOL && window.PAARA_OFFLINE?.dataUrls?.[relPath]) {
-      return window.PAARA_OFFLINE.dataUrls[relPath];
+  let currentSyncVisual = 'synced'; // 'synced' | 'pending' | 'pdf'
+
+  function setSyncIndicator(mode, labelOverride) {
+    const label =
+      labelOverride ||
+      (mode === 'synced' ? 'Caught up' : mode === 'pdf' ? 'Rebuilding PDF…' : 'Catching up…');
+    if (currentSyncVisual === mode && els.syncStatusText.textContent === label) {
+      return;
     }
-    return relPath;
+    currentSyncVisual = mode;
+    const isPending = mode !== 'synced';
+    els.syncStatusBadge.className = `sync-pill ${isPending ? 'pending' : 'synced'}`;
+    const iconEl = els.syncStatusBadge.querySelector('.sync-icon');
+    if (iconEl) {
+      iconEl.textContent = isPending ? '⟳' : '✓';
+    }
+    els.syncStatusText.textContent = label;
   }
 
   function base64ToUint8Array(b64) {
@@ -166,10 +224,6 @@
     return arr;
   }
 
-  /**
-   * Inject embedded @font-face data: URIs when opened over file:// so Safari/Firefox
-   * don't block cross-directory local font files.
-   */
   function injectOfflineFontFacesIfNeeded() {
     if (!IS_FILE_PROTOCOL || !window.PAARA_OFFLINE?.fontsBase64) return;
     const f = window.PAARA_OFFLINE.fontsBase64;
@@ -182,6 +236,154 @@
       @font-face { font-family: 'CinzelLocal'; src: url('data:font/ttf;base64,${f.displayBold}') format('truetype'); font-weight: 700; font-style: normal; }
     `;
     document.head.appendChild(style);
+  }
+
+  /**
+   * Preload static SVG/border assets into in-memory Blob/data URLs so browsers on https://
+   * never make repeat network re-validation or external SVG decode passes.
+   */
+  async function preloadStaticPreviewUrls() {
+    if (window.PAARA_OFFLINE?.dataUrls?.['assets/logos/paara-logo.svg']) {
+      cachedLogoHref = window.PAARA_OFFLINE.dataUrls['assets/logos/paara-logo.svg'];
+    } else {
+      try {
+        const r = await fetch('assets/logos/paara-logo.svg');
+        cachedLogoHref = URL.createObjectURL(await r.blob());
+      } catch {
+        cachedLogoHref = 'assets/logos/paara-logo.svg';
+      }
+    }
+
+    if (window.PAARA_OFFLINE?.dataUrls?.['assets/borders/original-cleaned.jpg']) {
+      cachedBorderHref = window.PAARA_OFFLINE.dataUrls['assets/borders/original-cleaned.jpg'];
+    } else {
+      try {
+        const r = await fetch('assets/borders/original-cleaned.jpg');
+        cachedBorderHref = URL.createObjectURL(await r.blob());
+      } catch {
+        cachedBorderHref = 'assets/borders/original-cleaned.jpg';
+      }
+    }
+  }
+
+  /**
+   * Initialize background Web Worker when running over HTTP(S).
+   */
+  function initWorker() {
+    if (IS_FILE_PROTOCOL || typeof Worker === 'undefined') return;
+    try {
+      renderWorker = new Worker('js/render-worker.js');
+      renderWorker.onmessage = (e) => {
+        const msg = e.data;
+        if (!msg) return;
+        if (msg.type === 'ready') {
+          workerReady = true;
+        } else if (msg.type === 'layoutResult') {
+          onLayoutComputed(msg.seq, msg.layout);
+        } else if (msg.type === 'pdfResult') {
+          const pending = pendingPdfResolvers.get(msg.reqId);
+          if (pending) {
+            pendingPdfResolvers.delete(msg.reqId);
+            pending.resolve(new Uint8Array(msg.pdfBuffer));
+          }
+        } else if (msg.type === 'pdfError') {
+          const pending = pendingPdfResolvers.get(msg.reqId);
+          if (pending) {
+            pendingPdfResolvers.delete(msg.reqId);
+            pending.reject(new Error(msg.message));
+          }
+        }
+      };
+      renderWorker.onerror = () => {
+        workerReady = false;
+        renderWorker = null;
+      };
+
+      // Clone font ArrayBuffers once into Worker
+      const buffersCopy = {};
+      for (const [k, u8] of Object.entries(fontBuffers)) {
+        buffersCopy[k] = u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
+      }
+      renderWorker.postMessage({ type: 'init', fontBuffers: buffersCopy });
+    } catch {
+      renderWorker = null;
+      workerReady = false;
+    }
+  }
+
+  /**
+   * Build lightweight (<2 KB) state snapshot for the Worker, omitting the base64 photo string.
+   */
+  function buildLiteStateSnapshot() {
+    return {
+      ...state,
+      photo: state.photo
+        ? {
+            present: true,
+            naturalWidth: state.photo.naturalWidth,
+            naturalHeight: state.photo.naturalHeight
+          }
+        : null
+    };
+  }
+
+  /**
+   * Schedule an asynchronous layout + preview update without doing ANY layout/DOM work synchronously.
+   */
+  function schedulePreviewUpdate({ delayMs = 200 } = {}) {
+    latestChangeSeq++;
+    const targetSeq = latestChangeSeq;
+    setSyncIndicator('pending');
+
+    clearTimeout(layoutDebounceTimer);
+    layoutDebounceTimer = setTimeout(() => {
+      dispatchLayoutComputation(targetSeq);
+    }, delayMs);
+
+    scheduleAutosave();
+  }
+
+  function dispatchLayoutComputation(seq) {
+    if (renderWorker && workerReady) {
+      renderWorker.postMessage({
+        type: 'layout',
+        seq,
+        stateLite: buildLiteStateSnapshot()
+      });
+    } else {
+      // Async fallback (e.g. file://) — yields to paint first, runs in <0.5ms with cached glyph widths
+      setTimeout(() => {
+        if (seq < latestChangeSeq) return;
+        const layout = computeProclamationLayout(state, fontMetrics);
+        onLayoutComputed(seq, layout);
+      }, 0);
+    }
+  }
+
+  function onLayoutComputed(seq, incomingLayout) {
+    // Discard stale out-of-order results if newer keystrokes arrived
+    if (seq < appliedSvgSeq) return;
+    appliedSvgSeq = seq;
+
+    // Re-attach photo dataUrl if computed from lite state snapshot
+    if (incomingLayout.photoBlock && state.photo?.dataUrl) {
+      incomingLayout.photoBlock.dataUrl = state.photo.dataUrl;
+    }
+
+    currentLayout = incomingLayout;
+    applyLayoutToDom(incomingLayout);
+
+    if (activeViewTab === 'pdf') {
+      if (seq === latestChangeSeq) {
+        setSyncIndicator('pdf');
+        clearTimeout(pdfDebounceTimer);
+        pdfDebounceTimer = setTimeout(() => {
+          refreshEmbeddedPdfViewer(seq);
+        }, 500);
+      }
+    } else if (seq === latestChangeSeq) {
+      setSyncIndicator('synced');
+    }
   }
 
   function svgEl(tag, attrs = {}) {
@@ -230,98 +432,122 @@
     }
   }
 
+  /**
+   * Incremental Layered SVG Renderer:
+   * - Border layer (~909 polygons) only updates when theme or page size changes.
+   * - Logo `<image>` is created once and only repositions x/y/width/height.
+   * - Photo `<image>` is reused across edits without re-decoding base64 bytes.
+   * - Citation lines consolidate words into `<tspan>`s (~22 total text elements).
+   */
   function renderSvgPreview(layout) {
-    const svg = els.proclamationSvg;
     const W = layout.page.width;
     const H = layout.page.height;
-    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-    svg.replaceChildren();
+    const viewBoxStr = `0 0 ${W} ${H}`;
+    if (els.proclamationSvg.getAttribute('viewBox') !== viewBoxStr) {
+      els.proclamationSvg.setAttribute('viewBox', viewBoxStr);
+    }
 
-    const titleNode = svgEl('title');
-    titleNode.textContent = `Proclamation preview for ${layout.bestowal?.honoree?.text || 'PAARA Honoree'}`;
-    svg.appendChild(titleNode);
+    const honoreeLabel = layout.bestowal?.honoree?.text || 'PAARA Honoree';
+    const nextTitle = `Proclamation preview for ${honoreeLabel}`;
+    if (els.svgTitleNode.textContent !== nextTitle) {
+      els.svgTitleNode.textContent = nextTitle;
+    }
 
-    const defs = svgEl('defs');
-    svg.appendChild(defs);
+    // 1. Border Layer — ONLY rebuild when theme or page dimensions change!
+    const borderKey = `${layout.border.themeId}:${W}x${H}`;
+    if (renderedBorderKey !== borderKey) {
+      renderedBorderKey = borderKey;
+      els.svgBorderLayer.replaceChildren();
+      const fullBorder = buildThemeBorder(layout.border.themeId, W, H);
 
-    if (layout.border.rasterUrl) {
-      svg.appendChild(
-        svgEl('image', {
-          href: resolveAssetUrl(layout.border.rasterUrl),
-          x: 0,
-          y: 0,
-          width: W,
-          height: H,
-          preserveAspectRatio: 'none'
-        })
-      );
-    } else {
-      for (const prim of layout.border.primitives) {
-        if (prim.type === 'rect') {
-          svg.appendChild(
-            svgEl('rect', {
-              x: prim.x,
-              y: prim.y,
-              width: prim.w,
-              height: prim.h,
-              fill: prim.fill || 'none',
-              stroke: prim.stroke || 'none',
-              'stroke-width': prim.stroke ? prim.strokeWidth || 1 : 0
-            })
-          );
-        } else if (prim.type === 'circle') {
-          svg.appendChild(
-            svgEl('circle', {
-              cx: prim.cx,
-              cy: prim.cy,
-              r: prim.r,
-              fill: prim.fill || 'none',
-              stroke: prim.stroke || 'none',
-              'stroke-width': prim.stroke ? prim.strokeWidth || 1 : 0
-            })
-          );
-        } else if (prim.type === 'line') {
-          svg.appendChild(
-            svgEl('line', {
-              x1: prim.x1,
-              y1: prim.y1,
-              x2: prim.x2,
-              y2: prim.y2,
-              stroke: prim.stroke || '#000',
-              'stroke-width': prim.strokeWidth || 1
-            })
-          );
-        } else if (prim.type === 'poly' && prim.points?.length) {
-          const ptsAttr = prim.points.map(([px, py]) => `${px.toFixed(2)},${py.toFixed(2)}`).join(' ');
-          svg.appendChild(
-            svgEl(prim.closed ? 'polygon' : 'polyline', {
-              points: ptsAttr,
-              fill: prim.closed ? prim.fill || 'none' : 'none',
-              stroke: prim.stroke || 'none',
-              'stroke-width': prim.stroke ? prim.strokeWidth || 1 : 0,
-              'stroke-linejoin': 'round',
-              'stroke-linecap': 'round'
-            })
-          );
+      if (fullBorder.rasterUrl) {
+        els.svgBorderLayer.appendChild(
+          svgEl('image', {
+            href: cachedBorderHref || fullBorder.rasterUrl,
+            x: 0,
+            y: 0,
+            width: W,
+            height: H,
+            preserveAspectRatio: 'none'
+          })
+        );
+      } else {
+        const frag = document.createDocumentFragment();
+        for (const prim of fullBorder.primitives) {
+          if (prim.type === 'rect') {
+            frag.appendChild(
+              svgEl('rect', {
+                x: prim.x,
+                y: prim.y,
+                width: prim.w,
+                height: prim.h,
+                fill: prim.fill || 'none',
+                stroke: prim.stroke || 'none',
+                'stroke-width': prim.stroke ? prim.strokeWidth || 1 : 0
+              })
+            );
+          } else if (prim.type === 'circle') {
+            frag.appendChild(
+              svgEl('circle', {
+                cx: prim.cx,
+                cy: prim.cy,
+                r: prim.r,
+                fill: prim.fill || 'none',
+                stroke: prim.stroke || 'none',
+                'stroke-width': prim.stroke ? prim.strokeWidth || 1 : 0
+              })
+            );
+          } else if (prim.type === 'line') {
+            frag.appendChild(
+              svgEl('line', {
+                x1: prim.x1,
+                y1: prim.y1,
+                x2: prim.x2,
+                y2: prim.y2,
+                stroke: prim.stroke || '#000',
+                'stroke-width': prim.strokeWidth || 1
+              })
+            );
+          } else if (prim.type === 'poly' && prim.points?.length) {
+            const ptsAttr = prim.points
+              .map(([px, py]) => `${px.toFixed(2)},${py.toFixed(2)}`)
+              .join(' ');
+            frag.appendChild(
+              svgEl(prim.closed ? 'polygon' : 'polyline', {
+                points: ptsAttr,
+                fill: prim.closed ? prim.fill || 'none' : 'none',
+                stroke: prim.stroke || 'none',
+                'stroke-width': prim.stroke ? prim.strokeWidth || 1 : 0,
+                'stroke-linejoin': 'round',
+                'stroke-linecap': 'round'
+              })
+            );
+          }
         }
+        els.svgBorderLayer.appendChild(frag);
       }
     }
 
-    svg.appendChild(
-      svgEl('image', {
-        href: resolveAssetUrl('assets/logos/paara-logo.svg'),
-        x: layout.logoBox.x,
-        y: layout.logoBox.y,
-        width: layout.logoBox.width,
-        height: layout.logoBox.height,
+    // 2. Persistent Logo Element — never re-created or re-fetched
+    if (!logoImageEl) {
+      logoImageEl = svgEl('image', {
+        href: cachedLogoHref || 'assets/logos/paara-logo.svg',
         preserveAspectRatio: 'xMidYMid meet'
-      })
-    );
+      });
+      els.svgLogoLayer.appendChild(logoImageEl);
+    }
+    logoImageEl.setAttribute('x', layout.logoBox.x);
+    logoImageEl.setAttribute('y', layout.logoBox.y);
+    logoImageEl.setAttribute('width', layout.logoBox.width);
+    logoImageEl.setAttribute('height', layout.logoBox.height);
 
+    // 3. Text & Divider Layer (lightweight ~22 nodes total via DocumentFragment)
     const textColor = layout.border.textColor || '#111111';
     const honoreeColor = layout.border.honoreeColor || '#0A0A0A';
     const accentColor = layout.border.accentColor || '#823E42';
     const secondaryColor = layout.border.secondaryAccent || '#B68B3A';
+
+    const textFrag = document.createDocumentFragment();
 
     if (layout.headerBlock) {
       const hb = layout.headerBlock;
@@ -333,24 +559,29 @@
         ...fontCssAttrs(hb.fontKey)
       });
       t.textContent = hb.text;
-      svg.appendChild(t);
+      textFrag.appendChild(t);
     }
 
-    const citGroup = svgEl('g');
+    // Consolidate each citation line into a single <text> with <tspan> word offsets
     for (const line of layout.citationLines) {
+      if (!line.words.length) continue;
+      const lineEl = svgEl('text', {
+        y: line.baselineY,
+        fill: textColor,
+        'font-size': line.fontSize,
+        ...fontCssAttrs(line.words[0].fontKey)
+      });
       for (const word of line.words) {
-        const tw = svgEl('text', {
-          x: word.x,
-          y: line.baselineY,
-          fill: textColor,
-          'font-size': line.fontSize,
-          ...fontCssAttrs(word.fontKey)
-        });
-        tw.textContent = word.text;
-        citGroup.appendChild(tw);
+        const spanAttrs = { x: word.x.toFixed(2) };
+        if (word.fontKey !== line.words[0].fontKey) {
+          Object.assign(spanAttrs, fontCssAttrs(word.fontKey));
+        }
+        const ts = svgEl('tspan', spanAttrs);
+        ts.textContent = word.text;
+        lineEl.appendChild(ts);
       }
+      textFrag.appendChild(lineEl);
     }
-    svg.appendChild(citGroup);
 
     for (const pre of layout.bestowal.preambles) {
       const t = svgEl('text', {
@@ -361,13 +592,13 @@
         ...fontCssAttrs('bold')
       });
       t.textContent = pre.text;
-      svg.appendChild(t);
+      textFrag.appendChild(t);
     }
 
     if (layout.bestowal.dividerOrnament) {
       const d = layout.bestowal.dividerOrnament;
       if (d.style === 'gold-diamond') {
-        svg.appendChild(
+        textFrag.appendChild(
           svgEl('line', {
             x1: d.centerX - d.halfSpan,
             y1: d.y,
@@ -377,7 +608,7 @@
             'stroke-width': 0.9
           })
         );
-        svg.appendChild(
+        textFrag.appendChild(
           svgEl('line', {
             x1: d.centerX + 10,
             y1: d.y,
@@ -387,14 +618,14 @@
             'stroke-width': 0.9
           })
         );
-        svg.appendChild(
+        textFrag.appendChild(
           svgEl('polygon', {
             points: `${d.centerX},${d.y - 4} ${d.centerX + 5.5},${d.y} ${d.centerX},${d.y + 4} ${d.centerX - 5.5},${d.y}`,
             fill: secondaryColor
           })
         );
       } else if (d.style === 'paara-lightning') {
-        svg.appendChild(
+        textFrag.appendChild(
           svgEl('line', {
             x1: d.centerX - d.halfSpan,
             y1: d.y,
@@ -404,7 +635,7 @@
             'stroke-width': 1.2
           })
         );
-        svg.appendChild(
+        textFrag.appendChild(
           svgEl('line', {
             x1: d.centerX + 14,
             y1: d.y,
@@ -414,7 +645,7 @@
             'stroke-width': 1.2
           })
         );
-        svg.appendChild(
+        textFrag.appendChild(
           svgEl('polygon', {
             points: `${d.centerX - 10},${d.y + 3.8} ${d.centerX + 1.5},${d.y - 4.2} ${d.centerX - 0.6},${d.y - 0.5} ${d.centerX + 10},${d.y - 3.8} ${d.centerX - 1.5},${d.y + 4.2} ${d.centerX + 0.6},${d.y + 0.5}`,
             fill: '#D22329'
@@ -432,7 +663,7 @@
       ...fontCssAttrs('bold')
     });
     honEl.textContent = hon.text;
-    svg.appendChild(honEl);
+    textFrag.appendChild(honEl);
 
     if (layout.bestowal.award) {
       const aw = layout.bestowal.award;
@@ -444,7 +675,7 @@
         ...fontCssAttrs('bold')
       });
       awEl.textContent = aw.text;
-      svg.appendChild(awEl);
+      textFrag.appendChild(awEl);
     }
 
     if (layout.bestowal.date) {
@@ -457,7 +688,7 @@
         ...fontCssAttrs('bold')
       });
       dtEl.textContent = dt.text;
-      svg.appendChild(dtEl);
+      textFrag.appendChild(dtEl);
     }
 
     if (layout.signatoriesBlock) {
@@ -470,7 +701,7 @@
         ...fontCssAttrs('bold')
       });
       sh.textContent = sb.heading.text;
-      svg.appendChild(sh);
+      textFrag.appendChild(sh);
 
       for (const row of sb.rows) {
         if (row.left) {
@@ -482,7 +713,7 @@
             ...fontCssAttrs('boldItalic')
           });
           lt.textContent = row.left.text;
-          svg.appendChild(lt);
+          textFrag.appendChild(lt);
         }
         if (row.right) {
           const rt = svgEl('text', {
@@ -493,68 +724,78 @@
             ...fontCssAttrs('boldItalic')
           });
           rt.textContent = row.right.text;
-          svg.appendChild(rt);
+          textFrag.appendChild(rt);
         }
       }
     }
 
-    if (layout.photoBlock) {
+    els.svgTextLayer.replaceChildren(textFrag);
+
+    // 4. Persistent Photo Layer — reuse <image> node so base64 image is never re-decoded on text edits!
+    if (layout.photoBlock && layout.photoBlock.dataUrl) {
       const pb = layout.photoBlock;
-      if (pb.frame) {
-        const pad = 3.5;
-        svg.appendChild(
-          svgEl('rect', {
-            x: pb.x - pad,
-            y: pb.y - pad,
-            width: pb.width + pad * 2,
-            height: pb.height + pad * 2,
-            fill: '#FFFFFF',
-            stroke: accentColor,
-            'stroke-width': 1.1
-          })
-        );
+      if (!photoImageEl) {
+        const clipPath = svgEl('clipPath', { id: 'honoreePhotoClip' });
+        photoClipRectEl = svgEl('rect');
+        clipPath.appendChild(photoClipRectEl);
+        els.svgDefs.replaceChildren(clipPath);
+
+        photoFrameRectEl = svgEl('rect', { fill: '#FFFFFF', 'stroke-width': 1.1 });
+        const clippedGroup = svgEl('g', { 'clip-path': 'url(#honoreePhotoClip)' });
+        photoImageEl = svgEl('image', { preserveAspectRatio: 'none' });
+        clippedGroup.appendChild(photoImageEl);
+
+        photoHitRectEl = svgEl('rect', { fill: 'transparent', class: 'svg-photo-hit' });
+        attachSvgPhotoPanHandler(photoHitRectEl);
+
+        els.svgPhotoLayer.replaceChildren(photoFrameRectEl, clippedGroup, photoHitRectEl);
       }
 
-      const clipId = 'honoreePhotoClip';
-      const clipPath = svgEl('clipPath', { id: clipId });
-      clipPath.appendChild(svgEl('rect', { x: pb.x, y: pb.y, width: pb.width, height: pb.height }));
-      defs.appendChild(clipPath);
+      if (cachedPhotoHref !== pb.dataUrl) {
+        cachedPhotoHref = pb.dataUrl;
+        photoImageEl.setAttribute('href', pb.dataUrl);
+      }
+
+      if (pb.frame) {
+        const pad = 3.5;
+        photoFrameRectEl.setAttribute('display', 'inline');
+        photoFrameRectEl.setAttribute('x', pb.x - pad);
+        photoFrameRectEl.setAttribute('y', pb.y - pad);
+        photoFrameRectEl.setAttribute('width', pb.width + pad * 2);
+        photoFrameRectEl.setAttribute('height', pb.height + pad * 2);
+        photoFrameRectEl.setAttribute('stroke', accentColor);
+      } else {
+        photoFrameRectEl.setAttribute('display', 'none');
+      }
+
+      photoClipRectEl.setAttribute('x', pb.x);
+      photoClipRectEl.setAttribute('y', pb.y);
+      photoClipRectEl.setAttribute('width', pb.width);
+      photoClipRectEl.setAttribute('height', pb.height);
 
       const scaleX = pb.width / pb.crop.width;
       const scaleY = pb.height / pb.crop.height;
-      const imgDrawW = pb.naturalWidth * scaleX;
-      const imgDrawH = pb.naturalHeight * scaleY;
-      const imgDrawX = pb.x - pb.crop.x * scaleX;
-      const imgDrawY = pb.y - pb.crop.y * scaleY;
+      photoImageEl.setAttribute('x', pb.x - pb.crop.x * scaleX);
+      photoImageEl.setAttribute('y', pb.y - pb.crop.y * scaleY);
+      photoImageEl.setAttribute('width', pb.naturalWidth * scaleX);
+      photoImageEl.setAttribute('height', pb.naturalHeight * scaleY);
 
-      const photoGroup = svgEl('g', { 'clip-path': `url(#${clipId})` });
-      photoGroup.appendChild(
-        svgEl('image', {
-          href: pb.dataUrl,
-          x: imgDrawX,
-          y: imgDrawY,
-          width: imgDrawW,
-          height: imgDrawH,
-          preserveAspectRatio: 'none'
-        })
-      );
-      svg.appendChild(photoGroup);
-
-      const hitRect = svgEl('rect', {
-        x: pb.x,
-        y: pb.y,
-        width: pb.width,
-        height: pb.height,
-        fill: 'transparent',
-        class: 'svg-photo-hit'
-      });
-      attachSvgPhotoPanHandler(hitRect);
-      svg.appendChild(hitRect);
+      photoHitRectEl.setAttribute('x', pb.x);
+      photoHitRectEl.setAttribute('y', pb.y);
+      photoHitRectEl.setAttribute('width', pb.width);
+      photoHitRectEl.setAttribute('height', pb.height);
+    } else if (photoImageEl) {
+      photoImageEl = null;
+      cachedPhotoHref = null;
+      els.svgDefs.replaceChildren();
+      els.svgPhotoLayer.replaceChildren();
     }
 
+    // 5. Overflow guideline overlay
+    els.svgOverlayLayer.replaceChildren();
     if (layout.overflowPt > 1) {
       const safeBottomY = layout.safeRect.y + layout.safeRect.height;
-      svg.appendChild(
+      els.svgOverlayLayer.appendChild(
         svgEl('line', {
           x1: layout.safeRect.x - 10,
           y1: safeBottomY,
@@ -570,11 +811,13 @@
     updatePreviewZoomSizing(layout.page);
   }
 
+  /**
+   * Uses ResizeObserver-cached `stageSize` instead of synchronous `getBoundingClientRect()`.
+   */
   function updatePreviewZoomSizing(pageSpec) {
     const mode = els.previewZoomSelect.value;
-    const stageRect = els.liveStage.getBoundingClientRect();
-    const availW = Math.max(260, stageRect.width - 48);
-    const availH = Math.max(320, stageRect.height - 48);
+    const availW = Math.max(260, stageSize.width - 40);
+    const availH = Math.max(320, stageSize.height - 40);
     const aspect = pageSpec.width / pageSpec.height;
 
     let displayW;
@@ -595,11 +838,82 @@
       displayH = displayW / aspect;
     }
 
-    els.svgPageWrap.style.width = `${Math.round(displayW)}px`;
-    els.svgPageWrap.style.height = `${Math.round(displayH)}px`;
+    const wPx = `${Math.round(displayW)}px`;
+    const hPx = `${Math.round(displayH)}px`;
+    if (els.svgPageWrap.style.width !== wPx) els.svgPageWrap.style.width = wPx;
+    if (els.svgPageWrap.style.height !== hPx) els.svgPageWrap.style.height = hPx;
+  }
+
+  function applyLayoutToDom(layout) {
+    renderSvgPreview(layout);
+
+    const pageSpec = PAGE_SIZES[state.pageSize] || PAGE_SIZES.legal;
+    els.pageSpecBadge.textContent = pageSpec.shortLabel;
+
+    els.citationSizeGroup.classList.toggle('disabled', state.autoFit);
+    els.citationSizeRange.disabled = state.autoFit;
+    if (state.autoFit) {
+      els.citationSizeVal.textContent = `${layout.effectiveCitationPt} pt (Auto)`;
+    } else {
+      els.citationSizeVal.textContent = `${Number(state.citationFontSize).toFixed(2)} pt`;
+    }
+
+    if (layout.overflowPt > 1) {
+      els.fitBanner.className = 'fit-banner warn';
+      els.fitBannerText.textContent = `⚠ Overflows by ${Math.ceil(layout.overflowPt)} pt`;
+      els.applyAutoFitBtn.classList.remove('hidden');
+    } else {
+      els.fitBanner.className = 'fit-banner ok';
+      els.fitBannerText.textContent = state.autoFit
+        ? `✓ Auto-Fit (${layout.renderedCitationPt} pt body)`
+        : `✓ Fits 1 page (${Math.round(layout.safeHeight - layout.usedHeight)} pt spare)`;
+      els.applyAutoFitBtn.classList.add('hidden');
+    }
+  }
+
+  /**
+   * Generate PDF bytes using the background Web Worker when available (zero UI freeze).
+   */
+  async function generatePdfAsync(layout, seq = latestChangeSeq) {
+    const assets = await preparePdfImageAssets(layout);
+    if (renderWorker && workerReady) {
+      const reqId = ++pdfReqCounter;
+      return new Promise((resolve, reject) => {
+        pendingPdfResolvers.set(reqId, { resolve, reject });
+        renderWorker.postMessage({
+          type: 'generatePdf',
+          reqId,
+          seq,
+          layout,
+          assets
+        });
+      });
+    }
+    return generateProclamationPdfBytes(layout, fontBuffers, assets);
+  }
+
+  async function refreshEmbeddedPdfViewer(seq = latestChangeSeq) {
+    if (!currentLayout || !fontBuffers.bold) return;
+    setSyncIndicator('pdf');
+    try {
+      const bytes = await generatePdfAsync(currentLayout, seq);
+      if (seq < latestChangeSeq) return; // Newer edit arrived while building PDF
+      const blob = new Blob([bytes], { type: 'application/pdf' });
+      if (currentPdfBlobUrl) URL.revokeObjectURL(currentPdfBlobUrl);
+      currentPdfBlobUrl = URL.createObjectURL(blob);
+      els.pdfPreviewFrame.src = currentPdfBlobUrl;
+      appliedPdfSeq = seq;
+      if (seq === latestChangeSeq) {
+        setSyncIndicator('synced');
+      }
+    } catch (err) {
+      console.error('PDF preview error:', err);
+      setSyncIndicator('synced');
+    }
   }
 
   function attachSvgPhotoPanHandler(hitRect) {
+    let rafPending = false;
     hitRect.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       hitRect.setPointerCapture(e.pointerId);
@@ -619,13 +933,19 @@
         syncRangeProgress(els.photoPanYRange);
         els.photoPanXVal.textContent = `${state.photoPanX}%`;
         els.photoPanYVal.textContent = `${state.photoPanY}%`;
-        renderAll({ skipPdfRefresh: true });
+        if (!rafPending) {
+          rafPending = true;
+          requestAnimationFrame(() => {
+            rafPending = false;
+            schedulePreviewUpdate({ delayMs: 0 });
+          });
+        }
       };
 
       const onUp = () => {
         hitRect.removeEventListener('pointermove', onMove);
         hitRect.removeEventListener('pointerup', onUp);
-        scheduleAutosave();
+        schedulePreviewUpdate({ delayMs: 10 });
       };
 
       hitRect.addEventListener('pointermove', onMove);
@@ -642,9 +962,6 @@
     slider.style.setProperty('--progress', `${pct.toFixed(1)}%`);
   }
 
-  /**
-   * Build accessible native `<input type="radio" name="theme">` cards inside `<fieldset>`.
-   */
   function renderThemeCards() {
     els.themeGrid.replaceChildren();
     for (const t of THEMES) {
@@ -663,8 +980,7 @@
       radio.addEventListener('change', () => {
         if (radio.checked) {
           state.theme = t.id;
-          renderAll();
-          scheduleAutosave();
+          schedulePreviewUpdate({ delayMs: 10 });
         }
       });
 
@@ -699,37 +1015,43 @@
         const nameIn = document.createElement('input');
         nameIn.type = 'text';
         nameIn.placeholder = 'Name';
+        nameIn.autocomplete = 'off';
+        nameIn.setAttribute('data-1p-ignore', '');
+        nameIn.setAttribute('data-lpignore', 'true');
         nameIn.value = item.name || '';
         nameIn.setAttribute('aria-label', `${side} row ${idx + 1} name`);
         nameIn.addEventListener('input', () => {
           item.name = nameIn.value;
-          renderAll();
-          scheduleAutosave();
+          schedulePreviewUpdate({ delayMs: 200 });
         });
 
         const callIn = document.createElement('input');
         callIn.type = 'text';
         callIn.placeholder = 'Call';
+        callIn.autocomplete = 'off';
         callIn.value = item.callsign || '';
         callIn.setAttribute('autocorrect', 'off');
         callIn.setAttribute('autocapitalize', 'characters');
         callIn.setAttribute('spellcheck', 'false');
+        callIn.setAttribute('data-1p-ignore', '');
+        callIn.setAttribute('data-lpignore', 'true');
         callIn.setAttribute('aria-label', `${side} row ${idx + 1} callsign`);
         callIn.addEventListener('input', () => {
           item.callsign = callIn.value;
-          renderAll();
-          scheduleAutosave();
+          schedulePreviewUpdate({ delayMs: 200 });
         });
 
         const roleIn = document.createElement('input');
         roleIn.type = 'text';
         roleIn.placeholder = 'Title / Role';
+        roleIn.autocomplete = 'off';
+        roleIn.setAttribute('data-1p-ignore', '');
+        roleIn.setAttribute('data-lpignore', 'true');
         roleIn.value = item.role || '';
         roleIn.setAttribute('aria-label', `${side} row ${idx + 1} role`);
         roleIn.addEventListener('input', () => {
           item.role = roleIn.value;
-          renderAll();
-          scheduleAutosave();
+          schedulePreviewUpdate({ delayMs: 200 });
         });
 
         const actions = document.createElement('div');
@@ -745,8 +1067,7 @@
           if (idx > 0) {
             [list[idx - 1], list[idx]] = [list[idx], list[idx - 1]];
             renderSignatoryColumns();
-            renderAll();
-            scheduleAutosave();
+            schedulePreviewUpdate({ delayMs: 10 });
           }
         });
 
@@ -768,8 +1089,7 @@
             state.signatoriesLeft.push(moved);
           }
           renderSignatoryColumns();
-          renderAll();
-          scheduleAutosave();
+          schedulePreviewUpdate({ delayMs: 10 });
         });
 
         const delBtn = document.createElement('button');
@@ -780,8 +1100,7 @@
         delBtn.addEventListener('click', () => {
           list.splice(idx, 1);
           renderSignatoryColumns();
-          renderAll();
-          scheduleAutosave();
+          schedulePreviewUpdate({ delayMs: 10 });
         });
 
         actions.append(upBtn, swapBtn, delBtn);
@@ -869,56 +1188,6 @@
     }
   }
 
-  let pdfRefreshTimer = null;
-
-  function renderAll(opts = {}) {
-    currentLayout = computeProclamationLayout(state, fontMetrics);
-    renderSvgPreview(currentLayout);
-
-    const pageSpec = PAGE_SIZES[state.pageSize] || PAGE_SIZES.legal;
-    els.pageSpecBadge.textContent = pageSpec.shortLabel;
-
-    els.citationSizeGroup.classList.toggle('disabled', state.autoFit);
-    els.citationSizeRange.disabled = state.autoFit;
-    if (state.autoFit) {
-      els.citationSizeVal.textContent = `${currentLayout.effectiveCitationPt} pt (Auto)`;
-    } else {
-      els.citationSizeVal.textContent = `${Number(state.citationFontSize).toFixed(2)} pt`;
-    }
-
-    if (currentLayout.overflowPt > 1) {
-      els.fitBanner.className = 'fit-banner warn';
-      els.fitBannerText.textContent = `⚠ Overflows page by ${Math.ceil(currentLayout.overflowPt)} pt — reduce font/photo size or enable Auto-Fit`;
-      els.applyAutoFitBtn.classList.remove('hidden');
-    } else {
-      els.fitBanner.className = 'fit-banner ok';
-      els.fitBannerText.textContent = state.autoFit
-        ? `✓ Auto-fitted cleanly (${currentLayout.renderedCitationPt} pt rendered body)`
-        : `✓ Fits cleanly on 1 page (${Math.round(currentLayout.safeHeight - currentLayout.usedHeight)} pt spare)`;
-      els.applyAutoFitBtn.classList.add('hidden');
-    }
-
-    if (activeViewTab === 'pdf' && !opts.skipPdfRefresh) {
-      clearTimeout(pdfRefreshTimer);
-      pdfRefreshTimer = setTimeout(() => {
-        refreshEmbeddedPdfViewer();
-      }, 280);
-    }
-  }
-
-  async function refreshEmbeddedPdfViewer() {
-    if (!currentLayout || !fontBuffers.bold) return;
-    try {
-      const bytes = await generateProclamationPdfBytes(currentLayout, fontBuffers);
-      const blob = new Blob([bytes], { type: 'application/pdf' });
-      if (currentPdfBlobUrl) URL.revokeObjectURL(currentPdfBlobUrl);
-      currentPdfBlobUrl = URL.createObjectURL(blob);
-      els.pdfPreviewFrame.src = currentPdfBlobUrl;
-    } catch (err) {
-      console.error('PDF preview error:', err);
-    }
-  }
-
   function applyRosterById(rosterId) {
     const roster =
       signatoriesData.rosters.find((r) => r.id === rosterId) || signatoriesData.rosters[0];
@@ -939,12 +1208,12 @@
           naturalHeight: img.naturalHeight,
           name
         };
+        photoDirtyForStorage = true;
         state.photoZoom = 1.0;
         state.photoPanX = 0;
         state.photoPanY = 0;
         syncPhotoUi();
-        renderAll();
-        scheduleAutosave();
+        schedulePreviewUpdate({ delayMs: 10 });
         resolve();
       };
       img.onerror = reject;
@@ -985,6 +1254,7 @@
     const ex = examplesData.find((e) => e.id === exampleId);
     if (!ex) return;
 
+    setSyncIndicator('pending');
     state.pageSize = ex.pageSize || 'legal';
     state.showHeader = Boolean(ex.showHeader);
     state.headerText = ex.headerText || 'OFFICIAL PROCLAMATION';
@@ -1015,33 +1285,52 @@
         await loadPhotoFromUrl(ex.photoUrl, ex.photoUrl.split('/').pop());
       } catch {
         state.photo = null;
+        photoDirtyForStorage = true;
       }
     } else {
       state.photo = null;
+      photoDirtyForStorage = true;
     }
 
     syncFormFromState();
-    renderAll();
-    scheduleAutosave();
+    schedulePreviewUpdate({ delayMs: 10 });
   }
 
+  /**
+   * Idle autosave: separates text (<2 KB) from base64 photo so typing never serializes image data.
+   */
   function scheduleAutosave() {
-    els.autosaveStatus.textContent = '● Saving...';
-    clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-        els.autosaveStatus.textContent = '● Saved locally';
-      } catch {
+    clearTimeout(autosaveTimer);
+    autosaveTimer = setTimeout(() => {
+      const runSave = () => {
         try {
-          const slim = { ...state, photo: null };
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(slim));
-          els.autosaveStatus.textContent = '● Text saved';
+          const { photo, ...textState } = state;
+          textState.hasSavedPhoto = Boolean(photo && photo.dataUrl);
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(textState));
+          if (photoDirtyForStorage) {
+            photoDirtyForStorage = false;
+            if (photo && photo.dataUrl) {
+              try {
+                localStorage.setItem(STORAGE_PHOTO_KEY, JSON.stringify(photo));
+              } catch {
+                // Quota exceeded for large custom photo; text state still safely saved
+              }
+            } else {
+              localStorage.removeItem(STORAGE_PHOTO_KEY);
+            }
+          }
+          els.autosaveStatus.textContent = '● Saved locally';
         } catch {
           els.autosaveStatus.textContent = '● Draft active';
         }
+      };
+
+      if (typeof window.requestIdleCallback === 'function') {
+        window.requestIdleCallback(runSave, { timeout: 1500 });
+      } else {
+        runSave();
       }
-    }, 350);
+    }, 1000);
   }
 
   function makeFilenameSlug(ext = 'pdf') {
@@ -1089,13 +1378,30 @@
 
     if (mode === 'live') {
       if (currentLayout) updatePreviewZoomSizing(currentLayout.page);
-    } else {
-      refreshEmbeddedPdfViewer();
+      if (appliedSvgSeq === latestChangeSeq) {
+        setSyncIndicator('synced');
+      }
+    } else if (appliedPdfSeq < latestChangeSeq || !currentPdfBlobUrl) {
+      refreshEmbeddedPdfViewer(latestChangeSeq);
     }
   }
 
   function bindEvents() {
-    els.proclamationForm.addEventListener('submit', (e) => e.preventDefault());
+    // Observe preview stage size asynchronously (zero synchronous getBoundingClientRect reflows!)
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver((entries) => {
+        for (const entry of entries) {
+          stageSize = {
+            width: entry.contentRect.width,
+            height: entry.contentRect.height
+          };
+          if (currentLayout && activeViewTab === 'live') {
+            updatePreviewZoomSizing(currentLayout.page);
+          }
+        }
+      });
+      ro.observe(els.liveStage);
+    }
 
     els.exampleSelect.addEventListener('change', () => {
       if (els.exampleSelect.value) {
@@ -1105,20 +1411,18 @@
 
     els.pageSizeSelect.addEventListener('change', () => {
       state.pageSize = els.pageSizeSelect.value;
-      renderAll();
-      scheduleAutosave();
+      schedulePreviewUpdate({ delayMs: 10 });
     });
     els.headerFontSelect.addEventListener('change', () => {
       state.headerFont = els.headerFontSelect.value;
-      renderAll();
-      scheduleAutosave();
+      schedulePreviewUpdate({ delayMs: 10 });
     });
 
+    // Zero-blocking text input bindings: ONLY update string property + schedule 200ms async catchup!
     const bindText = (el, key) => {
       el.addEventListener('input', () => {
         state[key] = el.value;
-        renderAll();
-        scheduleAutosave();
+        schedulePreviewUpdate({ delayMs: 200 });
       });
     };
     bindText(els.honoreeNameInput, 'honoreeName');
@@ -1135,8 +1439,7 @@
     els.showHeaderCheck.addEventListener('change', () => {
       state.showHeader = els.showHeaderCheck.checked;
       els.headerTextInput.disabled = !state.showHeader;
-      renderAll();
-      scheduleAutosave();
+      schedulePreviewUpdate({ delayMs: 10 });
     });
 
     document.querySelectorAll('.seg-btn[data-align]').forEach((btn) => {
@@ -1145,15 +1448,13 @@
         document.querySelectorAll('.seg-btn[data-align]').forEach((b) => {
           b.setAttribute('aria-pressed', String(b === btn));
         });
-        renderAll();
-        scheduleAutosave();
+        schedulePreviewUpdate({ delayMs: 10 });
       });
     });
 
     els.citationWeightSelect.addEventListener('change', () => {
       state.citationWeight = els.citationWeightSelect.value;
-      renderAll();
-      scheduleAutosave();
+      schedulePreviewUpdate({ delayMs: 10 });
     });
 
     els.autoFitCheck.addEventListener('change', () => {
@@ -1163,38 +1464,33 @@
         syncRangeProgress(els.citationSizeRange);
       }
       state.autoFit = els.autoFitCheck.checked;
-      renderAll();
-      scheduleAutosave();
+      schedulePreviewUpdate({ delayMs: 10 });
     });
 
     els.applyAutoFitBtn.addEventListener('click', () => {
       state.autoFit = true;
       els.autoFitCheck.checked = true;
-      renderAll();
-      scheduleAutosave();
+      schedulePreviewUpdate({ delayMs: 10 });
     });
 
     els.citationSizeRange.addEventListener('input', () => {
       state.citationFontSize = Number(els.citationSizeRange.value);
       syncRangeProgress(els.citationSizeRange);
-      renderAll();
-      scheduleAutosave();
+      schedulePreviewUpdate({ delayMs: 40 });
     });
 
     els.headingScaleRange.addEventListener('input', () => {
       state.headingScale = Number(els.headingScaleRange.value);
       syncRangeProgress(els.headingScaleRange);
       els.headingScaleVal.textContent = `${Math.round(state.headingScale * 100)}%`;
-      renderAll();
-      scheduleAutosave();
+      schedulePreviewUpdate({ delayMs: 40 });
     });
 
     els.lineSpacingRange.addEventListener('input', () => {
       state.lineSpacing = Number(els.lineSpacingRange.value);
       syncRangeProgress(els.lineSpacingRange);
       els.lineSpacingVal.textContent = `${state.lineSpacing.toFixed(2)}×`;
-      renderAll();
-      scheduleAutosave();
+      schedulePreviewUpdate({ delayMs: 40 });
     });
 
     const openPhotoPicker = () => els.photoFileInput.click();
@@ -1207,9 +1503,9 @@
     els.replacePhotoBtn.addEventListener('click', openPhotoPicker);
     els.removePhotoBtn.addEventListener('click', () => {
       state.photo = null;
+      photoDirtyForStorage = true;
       syncPhotoUi();
-      renderAll();
-      scheduleAutosave();
+      schedulePreviewUpdate({ delayMs: 10 });
     });
 
     els.photoFileInput.addEventListener('change', () => {
@@ -1224,44 +1520,38 @@
       state.photoMaxHeightRatio = Number(els.photoHeightRange.value);
       syncRangeProgress(els.photoHeightRange);
       els.photoHeightVal.textContent = `${Math.round(state.photoMaxHeightRatio * 100)}%`;
-      renderAll();
-      scheduleAutosave();
+      schedulePreviewUpdate({ delayMs: 35 });
     });
 
     els.photoAspectSelect.addEventListener('change', () => {
       state.photoAspect = els.photoAspectSelect.value;
-      renderAll();
-      scheduleAutosave();
+      schedulePreviewUpdate({ delayMs: 10 });
     });
 
     els.photoZoomRange.addEventListener('input', () => {
       state.photoZoom = Number(els.photoZoomRange.value);
       syncRangeProgress(els.photoZoomRange);
       els.photoZoomVal.textContent = `${state.photoZoom.toFixed(2)}×`;
-      renderAll();
-      scheduleAutosave();
+      schedulePreviewUpdate({ delayMs: 35 });
     });
 
     els.photoFrameCheck.addEventListener('change', () => {
       state.photoFrame = els.photoFrameCheck.checked;
-      renderAll();
-      scheduleAutosave();
+      schedulePreviewUpdate({ delayMs: 10 });
     });
 
     els.photoPanXRange.addEventListener('input', () => {
       state.photoPanX = Number(els.photoPanXRange.value);
       syncRangeProgress(els.photoPanXRange);
       els.photoPanXVal.textContent = `${state.photoPanX}%`;
-      renderAll();
-      scheduleAutosave();
+      schedulePreviewUpdate({ delayMs: 35 });
     });
 
     els.photoPanYRange.addEventListener('input', () => {
       state.photoPanY = Number(els.photoPanYRange.value);
       syncRangeProgress(els.photoPanYRange);
       els.photoPanYVal.textContent = `${state.photoPanY}%`;
-      renderAll();
-      scheduleAutosave();
+      schedulePreviewUpdate({ delayMs: 35 });
     });
 
     window.addEventListener('paste', (e) => {
@@ -1309,30 +1599,26 @@
     els.showSignatoriesCheck.addEventListener('change', () => {
       state.showSignatories = els.showSignatoriesCheck.checked;
       els.signatoriesBody.classList.toggle('hidden', !state.showSignatories);
-      renderAll();
-      scheduleAutosave();
+      schedulePreviewUpdate({ delayMs: 10 });
     });
 
     els.rosterSelect.addEventListener('change', () => {
       applyRosterById(els.rosterSelect.value);
       els.sigHeadingInput.value = state.signatoriesHeading;
       renderSignatoryColumns();
-      renderAll();
-      scheduleAutosave();
+      schedulePreviewUpdate({ delayMs: 10 });
     });
 
     els.addLeftSigBtn.addEventListener('click', () => {
       state.signatoriesLeft.push({ name: '', callsign: '', role: 'Officer' });
       renderSignatoryColumns();
-      renderAll();
-      scheduleAutosave();
+      schedulePreviewUpdate({ delayMs: 10 });
     });
 
     els.addRightSigBtn.addEventListener('click', () => {
       state.signatoriesRight.push({ name: '', callsign: '', role: 'Director' });
       renderSignatoryColumns();
-      renderAll();
-      scheduleAutosave();
+      schedulePreviewUpdate({ delayMs: 10 });
     });
 
     els.exportRosterJsonBtn.addEventListener('click', () => {
@@ -1383,7 +1669,7 @@
       }
     });
 
-    // Left Editor Section Tabs (Text | Theme & Sizing | Photo | Signatories)
+    // Left Editor Section Tabs
     const editorTabs = [
       { id: 'text', btn: els.edTabText, panel: els.edPanelText },
       { id: 'theme', btn: els.edTabTheme, panel: els.edPanelTheme },
@@ -1424,7 +1710,8 @@
 
     // Draggable Sidebar Resizer
     if (els.paneSplitter) {
-      const clampSidebarWidth = (px) => Math.max(390, Math.min(Math.round(window.innerWidth * 0.62), px));
+      const clampSidebarWidth = (px) =>
+        Math.max(390, Math.min(Math.round(window.innerWidth * 0.62), px));
 
       els.paneSplitter.addEventListener('pointerdown', (e) => {
         e.preventDefault();
@@ -1434,9 +1721,6 @@
         const onMove = (ev) => {
           const nextW = clampSidebarWidth(ev.clientX);
           document.documentElement.style.setProperty('--sidebar-width', `${nextW}px`);
-          if (currentLayout && activeViewTab === 'live') {
-            updatePreviewZoomSizing(currentLayout.page);
-          }
         };
 
         const onUp = () => {
@@ -1453,21 +1737,18 @@
         if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
           e.preventDefault();
           const cur =
-            parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--sidebar-width')) ||
-            540;
+            parseFloat(
+              getComputedStyle(document.documentElement).getPropertyValue('--sidebar-width')
+            ) || 540;
           const delta = e.key === 'ArrowRight' ? 24 : -24;
           document.documentElement.style.setProperty(
             '--sidebar-width',
             `${clampSidebarWidth(cur + delta)}px`
           );
-          if (currentLayout && activeViewTab === 'live') {
-            updatePreviewZoomSizing(currentLayout.page);
-          }
         }
       });
     }
 
-    // Accessible Preview Tabs (click + roving ArrowLeft/ArrowRight fallback when focusgroup is absent)
     els.tabLiveBtn.addEventListener('click', () => selectPreviewTab('live'));
     els.tabPdfBtn.addEventListener('click', () => selectPreviewTab('pdf'));
 
@@ -1485,23 +1766,30 @@
       if (currentLayout) updatePreviewZoomSizing(currentLayout.page);
     });
 
-    window.addEventListener('resize', () => {
-      if (currentLayout && activeViewTab === 'live') {
-        updatePreviewZoomSizing(currentLayout.page);
-      }
-    });
-
+    // Export PDF: immediately flush latest typed state + run pdf-lib inside the Web Worker!
     els.exportPdfBtn.addEventListener('click', async () => {
       const origText = els.exportPdfBtn.textContent;
       els.exportPdfBtn.disabled = true;
-      els.exportPdfBtn.textContent = 'Generating PDF...';
+      els.exportPdfBtn.textContent = 'Generating PDF…';
+      setSyncIndicator('pdf', 'Generating PDF…');
+      clearTimeout(layoutDebounceTimer);
+
       try {
-        const bytes = await generateProclamationPdfBytes(currentLayout, fontBuffers);
+        // Flush exact current state immediately so even a sub-200ms keystroke is included
+        const seq = ++latestChangeSeq;
+        const freshLayout = computeProclamationLayout(state, fontMetrics);
+        currentLayout = freshLayout;
+        appliedSvgSeq = seq;
+        applyLayoutToDom(freshLayout);
+
+        const bytes = await generatePdfAsync(freshLayout, seq);
         const blob = new Blob([bytes], { type: 'application/pdf' });
         downloadBlob(blob, makeFilenameSlug('pdf'));
+        setSyncIndicator('synced');
       } catch (err) {
         console.error('Export PDF failed:', err);
         alert(`Failed to generate PDF: ${err.message}`);
+        setSyncIndicator('synced');
       } finally {
         els.exportPdfBtn.disabled = false;
         els.exportPdfBtn.textContent = origText;
@@ -1516,9 +1804,9 @@
       const incoming = parsed.state || parsed;
       if (incoming && typeof incoming === 'object') {
         Object.assign(state, incoming);
+        photoDirtyForStorage = true;
         syncFormFromState();
-        renderAll();
-        scheduleAutosave();
+        schedulePreviewUpdate({ delayMs: 10 });
       }
     } catch (err) {
       alert(`Could not load JSON draft: ${err.message}`);
@@ -1578,8 +1866,14 @@
       els.brandLogoImg.src = window.PAARA_OFFLINE.dataUrls['assets/logos/paara-logo.svg'];
     }
 
+    const rect = els.liveStage.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) {
+      stageSize = { width: rect.width, height: rect.height };
+    }
+
     bindEvents();
-    await Promise.all([loadFonts(), loadJsonData()]);
+    await Promise.all([loadFonts(), loadJsonData(), preloadStaticPreviewUrls()]);
+    initWorker();
 
     els.rosterSelect.replaceChildren();
     for (const r of signatoriesData.rosters) {
@@ -1601,9 +1895,18 @@
     if (savedRaw) {
       try {
         const saved = JSON.parse(savedRaw);
-        Object.assign(state, saved);
+        const { hasSavedPhoto, ...rest } = saved;
+        Object.assign(state, rest);
+        if (hasSavedPhoto && !state.photo) {
+          const savedPhotoRaw = localStorage.getItem(STORAGE_PHOTO_KEY);
+          if (savedPhotoRaw) {
+            state.photo = JSON.parse(savedPhotoRaw);
+          }
+        }
         syncFormFromState();
-        renderAll();
+        currentLayout = computeProclamationLayout(state, fontMetrics);
+        applyLayoutToDom(currentLayout);
+        setSyncIndicator('synced');
         els.autosaveStatus.textContent = '● Restored local draft';
         return;
       } catch {

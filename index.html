@@ -29,7 +29,7 @@
         <div class="topbar-actions">
           <div class="example-picker-wrap">
             <label for="exampleSelect">Preset:</label>
-            <select id="exampleSelect" name="preset" class="topbar-select"></select>
+            <select id="exampleSelect" class="topbar-select"></select>
           </div>
 
           <button type="button" id="openDraftBtn" class="btn btn-ghost-dark">
@@ -39,7 +39,6 @@
           <input
             type="file"
             id="openDraftInput"
-            name="draft_file"
             accept=".json,application/json"
             class="visually-hidden"
           />
@@ -56,8 +55,13 @@
 
       <!-- Main Split Workspace -->
       <main id="workspaceMain" class="workspace">
-        <!-- Left Editor Column -->
-        <form id="proclamationForm" class="editor-shell" aria-label="Proclamation configuration" novalidate>
+        <!-- Left Editor Column (non-<form> container + data-1p-ignore prevents password-manager extension DOM thrash on https://) -->
+        <div
+          id="proclamationForm"
+          class="editor-shell"
+          role="region"
+          aria-label="Proclamation configuration"
+        >
           <!-- Editor Section Tabs -->
           <div
             id="editorTablist"
@@ -112,7 +116,7 @@
             </button>
           </div>
 
-          <!-- Editor Tab Panels (Block scroll containers — never clips or crushes children!) -->
+          <!-- Editor Tab Panels -->
           <div class="editor-panels-viewport">
             <!-- TAB 1: Text & Honoree -->
             <div
@@ -128,8 +132,10 @@
                     <input
                       type="text"
                       id="honoreeNameInput"
-                      name="honoree_name"
                       autocomplete="off"
+                      data-1p-ignore
+                      data-lpignore="true"
+                      data-form-type="other"
                       placeholder="e.g., Doug Teter"
                     />
                   </div>
@@ -138,10 +144,13 @@
                     <input
                       type="text"
                       id="honoreeCallInput"
-                      name="honoree_callsign"
+                      autocomplete="off"
                       autocorrect="off"
                       autocapitalize="characters"
                       spellcheck="false"
+                      data-1p-ignore
+                      data-lpignore="true"
+                      data-form-type="other"
                       placeholder="e.g., KG6LWE"
                     />
                   </div>
@@ -150,7 +159,7 @@
                 <div class="field">
                   <div class="field-label">
                     <div class="check-row">
-                      <input type="checkbox" id="showHeaderCheck" name="show_header" />
+                      <input type="checkbox" id="showHeaderCheck" />
                       <label for="showHeaderCheck">Show Top Heading</label>
                     </div>
                     <span class="field-hint">Optional banner below logo</span>
@@ -159,7 +168,9 @@
                   <input
                     type="text"
                     id="headerTextInput"
-                    name="header_text"
+                    autocomplete="off"
+                    data-1p-ignore
+                    data-lpignore="true"
                     placeholder="OFFICIAL PROCLAMATION"
                   />
                 </div>
@@ -171,9 +182,10 @@
                   </div>
                   <textarea
                     id="citationInput"
-                    name="citation"
                     rows="8"
                     aria-describedby="citationHint"
+                    data-1p-ignore
+                    data-lpignore="true"
                     placeholder="In recognition of unwavering support of PAARA..."
                   ></textarea>
                 </div>
@@ -190,7 +202,7 @@
 
                   <div class="field">
                     <label class="field-label" for="citationWeightSelect">Citation Weight</label>
-                    <select id="citationWeightSelect" name="citation_weight" class="ui-select">
+                    <select id="citationWeightSelect" class="ui-select">
                       <option value="bold">Bold (PAARA Traditional)</option>
                       <option value="regular">Regular Book Serif</option>
                     </select>
@@ -200,11 +212,25 @@
                 <div class="field-row">
                   <div class="field">
                     <label class="field-label" for="awardTitleInput">Award Line</label>
-                    <input type="text" id="awardTitleInput" name="award_title" placeholder="a Lifetime Membership" />
+                    <input
+                      type="text"
+                      id="awardTitleInput"
+                      autocomplete="off"
+                      data-1p-ignore
+                      data-lpignore="true"
+                      placeholder="a Lifetime Membership"
+                    />
                   </div>
                   <div class="field">
                     <label class="field-label" for="dateLineInput">Date Line</label>
-                    <input type="text" id="dateLineInput" name="date_line" placeholder="on this date of 9 January, 2026" />
+                    <input
+                      type="text"
+                      id="dateLineInput"
+                      autocomplete="off"
+                      data-1p-ignore
+                      data-lpignore="true"
+                      placeholder="on this date of 9 January, 2026"
+                    />
                   </div>
                 </div>
 
@@ -213,15 +239,15 @@
                   <div class="preamble-fields">
                     <div class="field">
                       <label class="field-label" for="bestowal1Input">Preamble Line 1</label>
-                      <input type="text" id="bestowal1Input" name="bestowal_line_1" />
+                      <input type="text" id="bestowal1Input" autocomplete="off" data-1p-ignore data-lpignore="true" />
                     </div>
                     <div class="field">
                       <label class="field-label" for="bestowal2Input">Preamble Line 2</label>
-                      <input type="text" id="bestowal2Input" name="bestowal_line_2" />
+                      <input type="text" id="bestowal2Input" autocomplete="off" data-1p-ignore data-lpignore="true" />
                     </div>
                     <div class="field">
                       <label class="field-label" for="bestowal3Input">Preamble Line 3</label>
-                      <input type="text" id="bestowal3Input" name="bestowal_line_3" />
+                      <input type="text" id="bestowal3Input" autocomplete="off" data-1p-ignore data-lpignore="true" />
                     </div>
                   </div>
                 </details>
@@ -247,7 +273,7 @@
                 <div class="field-row">
                   <div class="field">
                     <label class="field-label" for="pageSizeSelect">Page Dimensions</label>
-                    <select id="pageSizeSelect" name="page_size" class="ui-select">
+                    <select id="pageSizeSelect" class="ui-select">
                       <option value="legal">US Legal — 8.5" × 14" (2019–2024)</option>
                       <option value="tabloid">Tabloid — 11" × 17" (2026)</option>
                       <option value="letter">US Letter — 8.5" × 11"</option>
@@ -256,7 +282,7 @@
 
                   <div class="field">
                     <label class="field-label" for="headerFontSelect">Heading Typeface</label>
-                    <select id="headerFontSelect" name="header_font" class="ui-select">
+                    <select id="headerFontSelect" class="ui-select">
                       <option value="serif">Classic Georgia / Gelasio</option>
                       <option value="cinzel">Engraved Roman (Cinzel)</option>
                     </select>
@@ -278,7 +304,6 @@
                   <input
                     type="range"
                     id="citationSizeRange"
-                    name="citation_font_size"
                     min="10"
                     max="23"
                     step="0.25"
@@ -295,7 +320,6 @@
                     <input
                       type="range"
                       id="headingScaleRange"
-                      name="heading_scale"
                       min="0.75"
                       max="1.30"
                       step="0.02"
@@ -311,7 +335,6 @@
                     <input
                       type="range"
                       id="lineSpacingRange"
-                      name="line_spacing"
                       min="1.15"
                       max="1.75"
                       step="0.02"
@@ -349,7 +372,6 @@
                 <input
                   type="file"
                   id="photoFileInput"
-                  name="photo_file"
                   accept="image/*"
                   class="visually-hidden"
                 />
@@ -382,7 +404,6 @@
                       <input
                         type="range"
                         id="photoHeightRange"
-                        name="photo_height"
                         min="0.15"
                         max="0.44"
                         step="0.01"
@@ -392,7 +413,7 @@
 
                     <div class="field">
                       <label class="field-label" for="photoAspectSelect">Crop Aspect Ratio</label>
-                      <select id="photoAspectSelect" name="photo_aspect" class="ui-select">
+                      <select id="photoAspectSelect" class="ui-select">
                         <option value="original">Original Proportions</option>
                         <option value="4:3">4:3 Landscape</option>
                         <option value="16:10">16:10 Wide</option>
@@ -411,7 +432,6 @@
                       <input
                         type="range"
                         id="photoZoomRange"
-                        name="photo_zoom"
                         min="1"
                         max="2.5"
                         step="0.02"
@@ -421,7 +441,7 @@
 
                     <div class="field" style="justify-content: flex-end;">
                       <div class="check-row" style="padding-block-end: 6px;">
-                        <input type="checkbox" id="photoFrameCheck" name="photo_frame" />
+                        <input type="checkbox" id="photoFrameCheck" />
                         <label for="photoFrameCheck">Add Mat Border Frame</label>
                       </div>
                     </div>
@@ -436,7 +456,6 @@
                       <input
                         type="range"
                         id="photoPanXRange"
-                        name="photo_pan_x"
                         min="-100"
                         max="100"
                         step="1"
@@ -451,7 +470,6 @@
                       <input
                         type="range"
                         id="photoPanYRange"
-                        name="photo_pan_y"
                         min="-100"
                         max="100"
                         step="1"
@@ -474,7 +492,7 @@
               <div class="editor-panel-inner">
                 <div class="sig-top-row">
                   <div class="check-row">
-                    <input type="checkbox" id="showSignatoriesCheck" name="show_signatories" checked />
+                    <input type="checkbox" id="showSignatoriesCheck" checked />
                     <label for="showSignatoriesCheck">Include Signatories Block on Proclamation</label>
                   </div>
                   <button type="button" id="exportRosterJsonBtn" class="btn btn-secondary btn-sm">
@@ -486,11 +504,18 @@
                   <div class="field-row-honoree">
                     <div class="field">
                       <label class="field-label" for="rosterSelect">Board Roster Preset</label>
-                      <select id="rosterSelect" name="roster_id" class="ui-select"></select>
+                      <select id="rosterSelect" class="ui-select"></select>
                     </div>
                     <div class="field">
                       <label class="field-label" for="sigHeadingInput">Section Label</label>
-                      <input type="text" id="sigHeadingInput" name="sig_heading" value="Signed by:" />
+                      <input
+                        type="text"
+                        id="sigHeadingInput"
+                        value="Signed by:"
+                        autocomplete="off"
+                        data-1p-ignore
+                        data-lpignore="true"
+                      />
                     </div>
                   </div>
 
@@ -518,7 +543,7 @@
             </div>
           </div>
 
-          <!-- Persistent Fit & Auto-Fit Footer Bar (always visible regardless of active tab!) -->
+          <!-- Persistent Fit & Auto-Fit Footer Bar -->
           <div class="editor-footer">
             <div id="fitBanner" class="fit-banner ok" role="status" aria-live="polite">
               <span id="fitBannerText">✓ Fits cleanly on 1 page</span>
@@ -527,11 +552,11 @@
               </button>
             </div>
             <div class="check-row footer-autofit">
-              <input type="checkbox" id="autoFitCheck" name="auto_fit" checked />
+              <input type="checkbox" id="autoFitCheck" checked />
               <label for="autoFitCheck">Auto-Fit</label>
             </div>
           </div>
-        </form>
+        </div>
 
         <!-- Draggable Pane Resizer -->
         <div
@@ -576,11 +601,15 @@
             </div>
 
             <div class="preview-controls-right">
+              <span id="syncStatusBadge" class="sync-pill synced" role="status" aria-live="polite">
+                <span class="sync-icon" aria-hidden="true">✓</span>
+                <span id="syncStatusText">Caught up</span>
+              </span>
+
               <span id="pageSpecBadge" class="page-spec-pill">8.5" × 14" Legal</span>
               <label for="previewZoomSelect" class="field-hint">Zoom:</label>
               <select
                 id="previewZoomSelect"
-                name="preview_zoom"
                 class="ui-select ui-select-compact"
               >
                 <option value="fit">Fit Height</option>
@@ -606,7 +635,15 @@
                   xmlns="http://www.w3.org/2000/svg"
                   role="img"
                   aria-label="Live proclamation certificate preview"
-                ></svg>
+                >
+                  <title id="svgTitleNode">PAARA Life Membership Proclamation Preview</title>
+                  <defs id="svgDefs"></defs>
+                  <g id="svgBorderLayer"></g>
+                  <g id="svgLogoLayer"></g>
+                  <g id="svgTextLayer"></g>
+                  <g id="svgPhotoLayer"></g>
+                  <g id="svgOverlayLayer"></g>
+                </svg>
               </div>
             </div>
           </div>

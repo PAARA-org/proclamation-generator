@@ -1,12 +1,14 @@
 /**
  * True-Vector PDF Exporter (powered by local pdf-lib + @pdf-lib/fontkit)
- * Works seamlessly both over HTTP(S) and direct file:// opening.
+ * Runs inside the background Web Worker (using precomputed image bytes) or on the main thread.
  */
 (function () {
   'use strict';
 
+  const root = typeof window !== 'undefined' ? window : self;
+
   function hexToPdfRgb(hex) {
-    const { rgb } = window.PDFLib;
+    const { rgb } = root.PDFLib;
     if (!hex || hex === 'none') return null;
     const clean = hex.replace('#', '');
     const full =
@@ -49,7 +51,7 @@
       setLineWidth,
       setLineJoin,
       LineJoinStyle
-    } = window.PDFLib;
+    } = root.PDFLib;
 
     for (const prim of primitives) {
       const fillCol = prim.fill ? hexToPdfRgb(prim.fill) : null;
@@ -115,7 +117,7 @@
   async function rasterizeSvgAtHighDpi(svgSrc, targetPixelWidth = 1938, targetPixelHeight = 1254) {
     return new Promise((resolve, reject) => {
       const img = new Image();
-      if (!svgSrc.startsWith('data:')) {
+      if (!svgSrc.startsWith('data:') && !svgSrc.startsWith('blob:')) {
         img.crossOrigin = 'anonymous';
       }
       img.onload = () => {
@@ -141,7 +143,7 @@
   async function cropPhotoToJpegBytes(photoBlock) {
     return new Promise((resolve, reject) => {
       const img = new Image();
-      if (!photoBlock.dataUrl.startsWith('data:')) {
+      if (!photoBlock.dataUrl.startsWith('data:') && !photoBlock.dataUrl.startsWith('blob:')) {
         img.crossOrigin = 'anonymous';
       }
       img.onload = () => {
@@ -181,8 +183,8 @@
 
   async function loadAssetBytes(relPath) {
     if (cachedUrlBytes.has(relPath)) return cachedUrlBytes.get(relPath);
-    const offlineDataUrl = window.PAARA_OFFLINE?.dataUrls?.[relPath];
-    if (offlineDataUrl && (window.location?.protocol === 'file:' || !window.fetch)) {
+    const offlineDataUrl = root.PAARA_OFFLINE?.dataUrls?.[relPath];
+    if (offlineDataUrl && (root.location?.protocol === 'file:' || !root.fetch)) {
       const bytes = dataUrlToUint8Array(offlineDataUrl);
       cachedUrlBytes.set(relPath, bytes);
       return bytes;
@@ -203,10 +205,43 @@
     }
   }
 
-  async function generateProclamationPdfBytes(layout, fontBuffers) {
-    const { PDFDocument } = window.PDFLib;
+  /**
+   * Prepare image buffers on the main thread (canvas crop + cached logo PNG + optional border JPG)
+   * so the heavy PDF compilation can execute inside a DOM-free Web Worker.
+   */
+  async function preparePdfImageAssets(layout) {
+    if (!cachedLogoPngBytes) {
+      const svgSrc =
+        root.PAARA_OFFLINE?.dataUrls?.['assets/logos/paara-logo.svg'] ||
+        'assets/logos/paara-logo.svg';
+      try {
+        cachedLogoPngBytes = await rasterizeSvgAtHighDpi(svgSrc, 1938, 1254);
+      } catch {
+        cachedLogoPngBytes = await loadAssetBytes('assets/logos/paara-logo-transparent.png');
+      }
+    }
+
+    let borderJpgBytes = null;
+    if (layout.border.rasterUrl) {
+      borderJpgBytes = await loadAssetBytes(layout.border.rasterUrl);
+    }
+
+    let croppedPhotoJpegBytes = null;
+    if (layout.photoBlock && layout.photoBlock.dataUrl) {
+      croppedPhotoJpegBytes = await cropPhotoToJpegBytes(layout.photoBlock);
+    }
+
+    return {
+      logoPngBytes: cachedLogoPngBytes,
+      borderJpgBytes,
+      croppedPhotoJpegBytes
+    };
+  }
+
+  async function generateProclamationPdfBytes(layout, fontBuffers, precomputedAssets = null) {
+    const { PDFDocument } = root.PDFLib;
     const pdfDoc = await PDFDocument.create();
-    pdfDoc.registerFontkit(window.fontkit);
+    pdfDoc.registerFontkit(root.fontkit);
 
     const honoreeTitle = layout.bestowal?.honoree?.text || 'PAARA Life Member';
     pdfDoc.setTitle(`PAARA Lifetime Membership Proclamation — ${honoreeTitle}`);
@@ -221,31 +256,26 @@
       displayBold: await pdfDoc.embedFont(fontBuffers.displayBold, { subset: true })
     };
 
+    const assets = precomputedAssets || (await preparePdfImageAssets(layout));
+
     const W = layout.page.width;
     const H = layout.page.height;
     const page = pdfDoc.addPage([W, H]);
 
-    // 1. Border
-    if (layout.border.rasterUrl) {
-      const borderJpgBytes = await loadAssetBytes(layout.border.rasterUrl);
-      const borderImage = await pdfDoc.embedJpg(borderJpgBytes);
+    // Ensure border primitives exist (if stripped across postMessage, rebuild from memoized theme cache)
+    const borderInfo =
+      layout.border.primitives || layout.border.rasterUrl
+        ? layout.border
+        : root.PAARA.buildThemeBorder(layout.border.themeId, W, H);
+
+    if (borderInfo.rasterUrl && assets.borderJpgBytes) {
+      const borderImage = await pdfDoc.embedJpg(assets.borderJpgBytes);
       page.drawImage(borderImage, { x: 0, y: 0, width: W, height: H });
-    } else {
-      drawVectorPrimitivesOnPdfPage(page, layout.border.primitives, H);
+    } else if (borderInfo.primitives) {
+      drawVectorPrimitivesOnPdfPage(page, borderInfo.primitives, H);
     }
 
-    // 2. Club Logo (use data: URI from offline bundle when available so canvas never taints on file://)
-    if (!cachedLogoPngBytes) {
-      const svgSrc =
-        window.PAARA_OFFLINE?.dataUrls?.['assets/logos/paara-logo.svg'] ||
-        'assets/logos/paara-logo.svg';
-      try {
-        cachedLogoPngBytes = await rasterizeSvgAtHighDpi(svgSrc, 1938, 1254);
-      } catch {
-        cachedLogoPngBytes = await loadAssetBytes('assets/logos/paara-logo-transparent.png');
-      }
-    }
-    const logoImg = await pdfDoc.embedPng(cachedLogoPngBytes);
+    const logoImg = await pdfDoc.embedPng(assets.logoPngBytes);
     page.drawImage(logoImg, {
       x: layout.logoBox.x,
       y: H - layout.logoBox.y - layout.logoBox.height,
@@ -253,12 +283,11 @@
       height: layout.logoBox.height
     });
 
-    const textCol = hexToPdfRgb(layout.border.textColor || '#111111');
-    const honoreeCol = hexToPdfRgb(layout.border.honoreeColor || '#0A0A0A');
-    const accentCol = hexToPdfRgb(layout.border.accentColor || '#823E42');
-    const secondaryCol = hexToPdfRgb(layout.border.secondaryAccent || '#B68B3A');
+    const textCol = hexToPdfRgb(borderInfo.textColor || '#111111');
+    const honoreeCol = hexToPdfRgb(borderInfo.honoreeColor || '#0A0A0A');
+    const accentCol = hexToPdfRgb(borderInfo.accentColor || '#823E42');
+    const secondaryCol = hexToPdfRgb(borderInfo.secondaryAccent || '#B68B3A');
 
-    // 3. Optional Header
     if (layout.headerBlock) {
       const hb = layout.headerBlock;
       page.drawText(hb.text, {
@@ -270,7 +299,6 @@
       });
     }
 
-    // 4. Citation Lines
     for (const line of layout.citationLines) {
       const py = H - line.baselineY;
       for (const word of line.words) {
@@ -284,7 +312,6 @@
       }
     }
 
-    // 5. Bestowal Block
     for (const pre of layout.bestowal.preambles) {
       page.drawText(pre.text, {
         x: pre.x,
@@ -323,7 +350,7 @@
                 [d.centerX - 5.5, d.y]
               ],
               closed: true,
-              fill: layout.border.secondaryAccent || '#B68B3A'
+              fill: borderInfo.secondaryAccent || '#B68B3A'
             }
           ],
           H
@@ -394,7 +421,6 @@
       });
     }
 
-    // 6. Signatories
     if (layout.signatoriesBlock) {
       const sb = layout.signatoriesBlock;
       page.drawText(sb.heading.text, {
@@ -427,11 +453,9 @@
       }
     }
 
-    // 7. Framed / Cropped Honoree Photo
-    if (layout.photoBlock) {
+    if (layout.photoBlock && assets.croppedPhotoJpegBytes) {
       const pb = layout.photoBlock;
-      const croppedBytes = await cropPhotoToJpegBytes(pb);
-      const pdfPhoto = await pdfDoc.embedJpg(croppedBytes);
+      const pdfPhoto = await pdfDoc.embedJpg(assets.croppedPhotoJpegBytes);
       const pdfY = H - pb.y - pb.height;
 
       if (pb.frame) {
@@ -458,6 +482,6 @@
     return await pdfDoc.save();
   }
 
-  window.PAARA = window.PAARA || {};
-  Object.assign(window.PAARA, { generateProclamationPdfBytes });
+  root.PAARA = root.PAARA || {};
+  Object.assign(root.PAARA, { preparePdfImageAssets, generateProclamationPdfBytes });
 })();

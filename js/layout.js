@@ -38,17 +38,30 @@
   };
 
   const LOGO_ASPECT = 969 / 627;
+  const glyphUnitWidthCache = new WeakMap();
 
   function measureTextWidth(text, fontKey, fontSize, fontMetrics) {
     if (!text) return 0;
     const fk = fontMetrics && fontMetrics[fontKey];
     if (fk) {
-      try {
-        const run = fk.layout(text);
-        return (run.advanceWidth / fk.unitsPerEm) * fontSize;
-      } catch {
-        // Fallback below
+      let fontCache = glyphUnitWidthCache.get(fk);
+      if (!fontCache) {
+        fontCache = new Map();
+        glyphUnitWidthCache.set(fk, fontCache);
       }
+      let unitW = fontCache.get(text);
+      if (unitW === undefined) {
+        try {
+          const run = fk.layout(text);
+          unitW = run.advanceWidth / fk.unitsPerEm;
+        } catch {
+          unitW = text.length * 0.52;
+        }
+        // Cap cache size to prevent unbounded growth during long editing sessions
+        if (fontCache.size > 8000) fontCache.clear();
+        fontCache.set(text, unitW);
+      }
+      return unitW * fontSize;
     }
     return text.length * fontSize * 0.52;
   }
@@ -327,7 +340,10 @@
       : 0;
 
     const hasPhoto = Boolean(
-      state.photo && state.photo.dataUrl && state.photo.naturalWidth && state.photo.naturalHeight
+      state.photo &&
+        (state.photo.dataUrl || state.photo.present) &&
+        state.photo.naturalWidth &&
+        state.photo.naturalHeight
     );
     let photoW = 0;
     let photoH = 0;

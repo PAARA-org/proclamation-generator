@@ -577,18 +577,31 @@
     };
   }
 
+  const borderCache = new Map();
+
   function buildThemeBorder(themeId, width, height) {
+    const cacheKey = `${themeId || 'guilloche-classic'}:${width}x${height}`;
+    if (borderCache.has(cacheKey)) {
+      return borderCache.get(cacheKey);
+    }
+    let result;
     switch (themeId) {
       case 'original-extracted':
-        return buildOriginalExtracted(width, height);
+        result = buildOriginalExtracted(width, height);
+        break;
       case 'burgundy-gold':
-        return buildBurgundyGold(width, height);
+        result = buildBurgundyGold(width, height);
+        break;
       case 'paara-heritage':
-        return buildPaaraHeritage(width, height);
+        result = buildPaaraHeritage(width, height);
+        break;
       case 'guilloche-classic':
       default:
-        return buildGuillocheClassic(width, height);
+        result = buildGuillocheClassic(width, height);
+        break;
     }
+    borderCache.set(cacheKey, result);
+    return result;
   }
 
   window.PAARA = window.PAARA || {};
