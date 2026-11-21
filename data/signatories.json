@@ -1,0 +1,97 @@
+{
+  "$schema": "https://paara.org/schemas/signatories-v1.json",
+  "description": "Standard PAARA Officers & Directors signatory rosters for Life Membership Proclamations (source: https://paara.org/officers.html). Add a new year entry at the top of 'rosters' and update 'defaultRosterId' after annual elections.",
+  "defaultRosterId": "2026",
+  "rosters": [
+    {
+      "id": "2026",
+      "label": "Current PAARA Board of Directors",
+      "year": 2026,
+      "heading": "Signed by:",
+      "leftColumn": [
+        { "name": "Bob Ridenour", "callsign": "KN6YGN", "role": "President" },
+        { "name": "Rob Fenn", "callsign": "KC6TYD", "role": "Vice President" },
+        { "name": "Ric Hulett", "callsign": "N6AJS", "role": "Secretary" },
+        { "name": "Margaret Cooper", "callsign": "K6WEK", "role": "Treasurer" }
+      ],
+      "rightColumn": [
+        { "name": "Walt Gyger", "callsign": "K6WGY", "role": "Director" },
+        { "name": "Sorin Constantinescu", "callsign": "KN6YUH", "role": "Director" },
+        { "name": "Doug Teter", "callsign": "KG6LWE", "role": "Director" },
+        { "name": "Darryl Presley", "callsign": "KI6LDM", "role": "Director" }
+      ]
+    },
+    {
+      "id": "2024",
+      "label": "2024 Board of Directors",
+      "year": 2024,
+      "heading": "Signed by:",
+      "leftColumn": [
+        { "name": "Jim Thielemann", "callsign": "K6SV", "role": "President" },
+        { "name": "Rob Fenn", "callsign": "KC6TYD", "role": "Vice President" },
+        { "name": "Ric Hulett", "callsign": "N6AJS", "role": "Secretary" },
+        { "name": "Margaret Cooper", "callsign": "K6WEK", "role": "Treasurer" }
+      ],
+      "rightColumn": [
+        { "name": "Darryl Presley", "callsign": "KI6LDM", "role": "Director" },
+        { "name": "Doug Teter", "callsign": "KG6LWE", "role": "Director" },
+        { "name": "Walt Gyger", "callsign": "K6WGY", "role": "Director" },
+        { "name": "Bob Ridenour", "callsign": "KN6YGN", "role": "Director" }
+      ]
+    },
+    {
+      "id": "2023",
+      "label": "2023 Board of Directors",
+      "year": 2023,
+      "heading": "Signed by:",
+      "leftColumn": [
+        { "name": "Jim Thielemann", "callsign": "K6SV", "role": "President" },
+        { "name": "Rob Fenn", "callsign": "KC6TYD", "role": "Vice President" },
+        { "name": "Ric Hulett", "callsign": "N6AJS", "role": "Secretary" },
+        { "name": "Margaret Cooper", "callsign": "K6WEK", "role": "Treasurer" }
+      ],
+      "rightColumn": [
+        { "name": "Darryl Presley", "callsign": "KI6LDM", "role": "Director" },
+        { "name": "Doug Teter", "callsign": "KG6LWE", "role": "Director" },
+        { "name": "Joel Wilhite", "callsign": "KD6W", "role": "Director" },
+        { "name": "Walt Gyger", "callsign": "K6WGY", "role": "Director" }
+      ]
+    },
+    {
+      "id": "2022",
+      "label": "2022 Board of Directors",
+      "year": 2022,
+      "heading": "Signed by:",
+      "leftColumn": [
+        { "name": "Jim Thielemann", "callsign": "K6SV", "role": "President" },
+        { "name": "Rob Fenn", "callsign": "KC6TYD", "role": "Vice President" },
+        { "name": "Ric Hulett", "callsign": "N6AJS", "role": "Secretary" },
+        { "name": "Bob Korte", "callsign": "KD6KYT", "role": "Treasurer" }
+      ],
+      "rightColumn": [
+        { "name": "Darryl Presley", "callsign": "KI6LDM", "role": "Director" },
+        { "name": "Doug Teter", "callsign": "KG6LWE", "role": "Director" },
+        { "name": "Joel Wilhite", "callsign": "KD6W", "role": "Director" },
+        { "name": "Walt Gyger", "callsign": "K6WGY", "role": "Director" }
+      ]
+    },
+    {
+      "id": "2019",
+      "label": "2019 Board of Directors",
+      "year": 2019,
+      "heading": "Signed by:",
+      "leftColumn": [
+        { "name": "Kristen McIntyre", "callsign": "K6WX", "role": "President" },
+        { "name": "Marty Wayne", "callsign": "W6NEV", "role": "Vice President" },
+        { "name": "Jim Thielemann", "callsign": "K6SV", "role": "Secretary" },
+        { "name": "Ron Chester", "callsign": "W6AZ", "role": "Treasurer" }
+      ],
+      "rightColumn": [
+        { "name": "Darryl Presley", "callsign": "KI6LDM", "role": "Director" },
+        { "name": "Larry Rebarchik", "callsign": "N6DB", "role": "Director" },
+        { "name": "Joel Wilhite", "callsign": "KD6W", "role": "Director" },
+        { "name": "Walt Gyger", "callsign": "K6WGY", "role": "Director" }
+      ]
+    }
+  ]
+}

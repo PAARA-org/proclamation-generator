@@ -1,0 +1,646 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Life Membership Proclamation Generator | PAARA (W6OTX)</title>
+    <link rel="stylesheet" href="css/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <!-- Top Bar -->
+      <header class="topbar">
+        <div class="brand">
+          <img
+            id="brandLogoImg"
+            src="assets/logos/paara-logo.svg"
+            alt=""
+            class="brand-logo"
+          />
+          <div class="brand-titles">
+            <h1 class="brand-title">PAARA Life Membership Proclamation Generator</h1>
+            <div class="brand-subtitle">
+              <span>Palo Alto Amateur Radio Association · W6OTX</span>
+              <span id="autosaveStatus" class="autosave-pill">● Ready</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="topbar-actions">
+          <div class="example-picker-wrap">
+            <label for="exampleSelect">Preset:</label>
+            <select id="exampleSelect" name="preset" class="topbar-select"></select>
+          </div>
+
+          <button type="button" id="openDraftBtn" class="btn btn-ghost-dark">
+            Open Draft
+          </button>
+          <label for="openDraftInput" class="visually-hidden">Open proclamation JSON draft file</label>
+          <input
+            type="file"
+            id="openDraftInput"
+            name="draft_file"
+            accept=".json,application/json"
+            class="visually-hidden"
+          />
+
+          <button type="button" id="saveDraftBtn" class="btn btn-ghost-dark">
+            Save Draft (.json)
+          </button>
+
+          <button type="button" id="exportPdfBtn" class="btn btn-primary">
+            ⬇ Export PDF
+          </button>
+        </div>
+      </header>
+
+      <!-- Main Split Workspace -->
+      <main id="workspaceMain" class="workspace">
+        <!-- Left Editor Column -->
+        <form id="proclamationForm" class="editor-shell" aria-label="Proclamation configuration" novalidate>
+          <!-- Editor Section Tabs -->
+          <div
+            id="editorTablist"
+            class="editor-tabs"
+            role="tablist"
+            focusgroup="tablist nomemory"
+            aria-label="Editor sections"
+          >
+            <button
+              type="button"
+              id="edTabText"
+              class="editor-tab"
+              role="tab"
+              data-edtab="text"
+              aria-selected="true"
+              focusgroupstart
+            >
+              Text &amp; Honoree
+            </button>
+            <button
+              type="button"
+              id="edTabTheme"
+              class="editor-tab"
+              role="tab"
+              data-edtab="theme"
+              aria-selected="false"
+              tabindex="-1"
+            >
+              Theme &amp; Sizing
+            </button>
+            <button
+              type="button"
+              id="edTabPhoto"
+              class="editor-tab"
+              role="tab"
+              data-edtab="photo"
+              aria-selected="false"
+              tabindex="-1"
+            >
+              Photo
+            </button>
+            <button
+              type="button"
+              id="edTabSigs"
+              class="editor-tab"
+              role="tab"
+              data-edtab="sigs"
+              aria-selected="false"
+              tabindex="-1"
+            >
+              Signatories
+            </button>
+          </div>
+
+          <!-- Editor Tab Panels (Block scroll containers — never clips or crushes children!) -->
+          <div class="editor-panels-viewport">
+            <!-- TAB 1: Text & Honoree -->
+            <div
+              id="edPanelText"
+              class="editor-tabpanel"
+              role="tabpanel"
+              aria-labelledby="edTabText"
+            >
+              <div class="editor-panel-inner">
+                <div class="field-row-honoree">
+                  <div class="field">
+                    <label class="field-label" for="honoreeNameInput">Honoree Name</label>
+                    <input
+                      type="text"
+                      id="honoreeNameInput"
+                      name="honoree_name"
+                      autocomplete="off"
+                      placeholder="e.g., Doug Teter"
+                    />
+                  </div>
+                  <div class="field">
+                    <label class="field-label" for="honoreeCallInput">Call Sign</label>
+                    <input
+                      type="text"
+                      id="honoreeCallInput"
+                      name="honoree_callsign"
+                      autocorrect="off"
+                      autocapitalize="characters"
+                      spellcheck="false"
+                      placeholder="e.g., KG6LWE"
+                    />
+                  </div>
+                </div>
+
+                <div class="field">
+                  <div class="field-label">
+                    <div class="check-row">
+                      <input type="checkbox" id="showHeaderCheck" name="show_header" />
+                      <label for="showHeaderCheck">Show Top Heading</label>
+                    </div>
+                    <span class="field-hint">Optional banner below logo</span>
+                  </div>
+                  <label class="visually-hidden" for="headerTextInput">Top Proclamation Heading Text</label>
+                  <input
+                    type="text"
+                    id="headerTextInput"
+                    name="header_text"
+                    placeholder="OFFICIAL PROCLAMATION"
+                  />
+                </div>
+
+                <div class="field">
+                  <div class="field-label">
+                    <label for="citationInput">Citation / Recognition Text</label>
+                    <span id="citationHint" class="field-hint">Wrap words in *asterisks* for italic</span>
+                  </div>
+                  <textarea
+                    id="citationInput"
+                    name="citation"
+                    rows="8"
+                    aria-describedby="citationHint"
+                    placeholder="In recognition of unwavering support of PAARA..."
+                  ></textarea>
+                </div>
+
+                <div class="field-row">
+                  <div class="field">
+                    <span id="alignGroupLabel" class="field-label">Citation Alignment</span>
+                    <div class="segmented" role="group" aria-labelledby="alignGroupLabel">
+                      <button type="button" class="seg-btn" data-align="left" aria-pressed="true">Left</button>
+                      <button type="button" class="seg-btn" data-align="center" aria-pressed="false">Center</button>
+                      <button type="button" class="seg-btn" data-align="justify" aria-pressed="false">Justify</button>
+                    </div>
+                  </div>
+
+                  <div class="field">
+                    <label class="field-label" for="citationWeightSelect">Citation Weight</label>
+                    <select id="citationWeightSelect" name="citation_weight" class="ui-select">
+                      <option value="bold">Bold (PAARA Traditional)</option>
+                      <option value="regular">Regular Book Serif</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="field-row">
+                  <div class="field">
+                    <label class="field-label" for="awardTitleInput">Award Line</label>
+                    <input type="text" id="awardTitleInput" name="award_title" placeholder="a Lifetime Membership" />
+                  </div>
+                  <div class="field">
+                    <label class="field-label" for="dateLineInput">Date Line</label>
+                    <input type="text" id="dateLineInput" name="date_line" placeholder="on this date of 9 January, 2026" />
+                  </div>
+                </div>
+
+                <details class="preamble-details">
+                  <summary>Customize Bestowal Preamble Lines ("The Officers and Directors...")</summary>
+                  <div class="preamble-fields">
+                    <div class="field">
+                      <label class="field-label" for="bestowal1Input">Preamble Line 1</label>
+                      <input type="text" id="bestowal1Input" name="bestowal_line_1" />
+                    </div>
+                    <div class="field">
+                      <label class="field-label" for="bestowal2Input">Preamble Line 2</label>
+                      <input type="text" id="bestowal2Input" name="bestowal_line_2" />
+                    </div>
+                    <div class="field">
+                      <label class="field-label" for="bestowal3Input">Preamble Line 3</label>
+                      <input type="text" id="bestowal3Input" name="bestowal_line_3" />
+                    </div>
+                  </div>
+                </details>
+              </div>
+            </div>
+
+            <!-- TAB 2: Theme & Sizing -->
+            <div
+              id="edPanelTheme"
+              class="editor-tabpanel"
+              role="tabpanel"
+              aria-labelledby="edTabTheme"
+              hidden
+            >
+              <div class="editor-panel-inner">
+                <fieldset class="clean-fieldset">
+                  <legend class="section-subhead">Proclamation Border Theme</legend>
+                  <div id="themeGrid" class="theme-grid"></div>
+                </fieldset>
+
+                <div class="divider-line"></div>
+
+                <div class="field-row">
+                  <div class="field">
+                    <label class="field-label" for="pageSizeSelect">Page Dimensions</label>
+                    <select id="pageSizeSelect" name="page_size" class="ui-select">
+                      <option value="legal">US Legal — 8.5" × 14" (2019–2024)</option>
+                      <option value="tabloid">Tabloid — 11" × 17" (2026)</option>
+                      <option value="letter">US Letter — 8.5" × 11"</option>
+                    </select>
+                  </div>
+
+                  <div class="field">
+                    <label class="field-label" for="headerFontSelect">Heading Typeface</label>
+                    <select id="headerFontSelect" name="header_font" class="ui-select">
+                      <option value="serif">Classic Georgia / Gelasio</option>
+                      <option value="cinzel">Engraved Roman (Cinzel)</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="divider-line"></div>
+
+                <div class="section-subhead-row">
+                  <span class="section-subhead" style="margin: 0;">Typography &amp; Fitting</span>
+                  <span class="field-hint">Uncheck Auto-Fit below for manual pt size</span>
+                </div>
+
+                <div id="citationSizeGroup" class="slider-group">
+                  <div class="field-label">
+                    <label for="citationSizeRange">Citation Font Size</label>
+                    <span id="citationSizeVal" class="value-badge">15.5 pt</span>
+                  </div>
+                  <input
+                    type="range"
+                    id="citationSizeRange"
+                    name="citation_font_size"
+                    min="10"
+                    max="23"
+                    step="0.25"
+                    value="15.5"
+                  />
+                </div>
+
+                <div class="field-row">
+                  <div class="slider-group">
+                    <div class="field-label">
+                      <label for="headingScaleRange">Bestowal &amp; Name Scale</label>
+                      <span id="headingScaleVal" class="value-badge">100%</span>
+                    </div>
+                    <input
+                      type="range"
+                      id="headingScaleRange"
+                      name="heading_scale"
+                      min="0.75"
+                      max="1.30"
+                      step="0.02"
+                      value="1.00"
+                    />
+                  </div>
+
+                  <div class="slider-group">
+                    <div class="field-label">
+                      <label for="lineSpacingRange">Line Spacing</label>
+                      <span id="lineSpacingVal" class="value-badge">1.38×</span>
+                    </div>
+                    <input
+                      type="range"
+                      id="lineSpacingRange"
+                      name="line_spacing"
+                      min="1.15"
+                      max="1.75"
+                      step="0.02"
+                      value="1.38"
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- TAB 3: Photo -->
+            <div
+              id="edPanelPhoto"
+              class="editor-tabpanel"
+              role="tabpanel"
+              aria-labelledby="edTabPhoto"
+              hidden
+            >
+              <div class="editor-panel-inner">
+                <div id="photoEmptyState" style="display: flex; flex-direction: column; gap: 10px;">
+                  <button type="button" id="photoDropzone" class="photo-dropzone">
+                    <span class="photo-dropzone-title">Click to Upload, Drag &amp; Drop, or Paste Image (⌘V)</span>
+                    <span class="photo-dropzone-sub">
+                      Supports JPG, PNG, WebP · Paste from clipboard on any tab
+                    </span>
+                  </button>
+                  <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px;">
+                    <span class="field-hint">Testing layout spacing before you have a photo?</span>
+                    <button type="button" id="useSamplePhotoBtn" class="btn btn-secondary btn-sm">
+                      Use Sample Photo
+                    </button>
+                  </div>
+                </div>
+                <label for="photoFileInput" class="visually-hidden">Upload honoree photo</label>
+                <input
+                  type="file"
+                  id="photoFileInput"
+                  name="photo_file"
+                  accept="image/*"
+                  class="visually-hidden"
+                />
+
+                <div id="photoControlsWrap" class="photo-controls-stack hidden">
+                  <div class="photo-active-bar">
+                    <div class="photo-thumb-info">
+                      <img id="photoThumb" class="photo-thumb" alt="Selected honoree photo preview" />
+                      <div>
+                        <div id="photoMetaText" class="photo-meta-title">Photo attached</div>
+                        <div class="field-hint">Drag directly on the certificate photo to pan</div>
+                      </div>
+                    </div>
+                    <div style="display: flex; gap: 6px; flex-shrink: 0;">
+                      <button type="button" id="replacePhotoBtn" class="btn btn-secondary btn-sm">
+                        Replace
+                      </button>
+                      <button type="button" id="removePhotoBtn" class="btn btn-secondary btn-sm">
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+
+                  <div class="field-row">
+                    <div class="slider-group">
+                      <div class="field-label">
+                        <label for="photoHeightRange">Max Photo Height</label>
+                        <span id="photoHeightVal" class="value-badge">28%</span>
+                      </div>
+                      <input
+                        type="range"
+                        id="photoHeightRange"
+                        name="photo_height"
+                        min="0.15"
+                        max="0.44"
+                        step="0.01"
+                        value="0.28"
+                      />
+                    </div>
+
+                    <div class="field">
+                      <label class="field-label" for="photoAspectSelect">Crop Aspect Ratio</label>
+                      <select id="photoAspectSelect" name="photo_aspect" class="ui-select">
+                        <option value="original">Original Proportions</option>
+                        <option value="4:3">4:3 Landscape</option>
+                        <option value="16:10">16:10 Wide</option>
+                        <option value="1:1">1:1 Square</option>
+                        <option value="4:5">4:5 Portrait</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div class="field-row">
+                    <div class="slider-group">
+                      <div class="field-label">
+                        <label for="photoZoomRange">Crop Zoom</label>
+                        <span id="photoZoomVal" class="value-badge">1.00×</span>
+                      </div>
+                      <input
+                        type="range"
+                        id="photoZoomRange"
+                        name="photo_zoom"
+                        min="1"
+                        max="2.5"
+                        step="0.02"
+                        value="1"
+                      />
+                    </div>
+
+                    <div class="field" style="justify-content: flex-end;">
+                      <div class="check-row" style="padding-block-end: 6px;">
+                        <input type="checkbox" id="photoFrameCheck" name="photo_frame" />
+                        <label for="photoFrameCheck">Add Mat Border Frame</label>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="field-row">
+                    <div class="slider-group">
+                      <div class="field-label">
+                        <label for="photoPanXRange">Horizontal Pan</label>
+                        <span id="photoPanXVal" class="value-badge">0%</span>
+                      </div>
+                      <input
+                        type="range"
+                        id="photoPanXRange"
+                        name="photo_pan_x"
+                        min="-100"
+                        max="100"
+                        step="1"
+                        value="0"
+                      />
+                    </div>
+                    <div class="slider-group">
+                      <div class="field-label">
+                        <label for="photoPanYRange">Vertical Pan</label>
+                        <span id="photoPanYVal" class="value-badge">0%</span>
+                      </div>
+                      <input
+                        type="range"
+                        id="photoPanYRange"
+                        name="photo_pan_y"
+                        min="-100"
+                        max="100"
+                        step="1"
+                        value="0"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- TAB 4: Signatories -->
+            <div
+              id="edPanelSigs"
+              class="editor-tabpanel"
+              role="tabpanel"
+              aria-labelledby="edTabSigs"
+              hidden
+            >
+              <div class="editor-panel-inner">
+                <div class="sig-top-row">
+                  <div class="check-row">
+                    <input type="checkbox" id="showSignatoriesCheck" name="show_signatories" checked />
+                    <label for="showSignatoriesCheck">Include Signatories Block on Proclamation</label>
+                  </div>
+                  <button type="button" id="exportRosterJsonBtn" class="btn btn-secondary btn-sm">
+                    Export signatories.json
+                  </button>
+                </div>
+
+                <div id="signatoriesBody" class="sig-body-stack">
+                  <div class="field-row-honoree">
+                    <div class="field">
+                      <label class="field-label" for="rosterSelect">Board Roster Preset</label>
+                      <select id="rosterSelect" name="roster_id" class="ui-select"></select>
+                    </div>
+                    <div class="field">
+                      <label class="field-label" for="sigHeadingInput">Section Label</label>
+                      <input type="text" id="sigHeadingInput" name="sig_heading" value="Signed by:" />
+                    </div>
+                  </div>
+
+                  <div class="sig-col-section">
+                    <div class="sig-col-header">
+                      <span>Left Column — Officers</span>
+                      <button type="button" id="addLeftSigBtn" class="btn btn-secondary btn-sm">
+                        + Add Officer
+                      </button>
+                    </div>
+                    <div id="leftSigList" class="sig-list"></div>
+                  </div>
+
+                  <div class="sig-col-section">
+                    <div class="sig-col-header">
+                      <span>Right Column — Past President &amp; Directors</span>
+                      <button type="button" id="addRightSigBtn" class="btn btn-secondary btn-sm">
+                        + Add Director
+                      </button>
+                    </div>
+                    <div id="rightSigList" class="sig-list"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Persistent Fit & Auto-Fit Footer Bar (always visible regardless of active tab!) -->
+          <div class="editor-footer">
+            <div id="fitBanner" class="fit-banner ok" role="status" aria-live="polite">
+              <span id="fitBannerText">✓ Fits cleanly on 1 page</span>
+              <button type="button" id="applyAutoFitBtn" class="btn btn-secondary btn-sm hidden">
+                Fix Fit
+              </button>
+            </div>
+            <div class="check-row footer-autofit">
+              <input type="checkbox" id="autoFitCheck" name="auto_fit" checked />
+              <label for="autoFitCheck">Auto-Fit</label>
+            </div>
+          </div>
+        </form>
+
+        <!-- Draggable Pane Resizer -->
+        <div
+          id="paneSplitter"
+          class="pane-splitter"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize editor panel"
+          tabindex="0"
+        ></div>
+
+        <!-- Right Live Preview & Exact PDF Pane -->
+        <div class="preview-pane">
+          <div class="preview-toolbar">
+            <div
+              id="previewTablist"
+              class="preview-tabs"
+              role="tablist"
+              focusgroup="tablist nomemory"
+              aria-label="Proclamation preview mode"
+            >
+              <button
+                type="button"
+                id="tabLiveBtn"
+                class="preview-tab"
+                role="tab"
+                aria-selected="true"
+                focusgroupstart
+              >
+                Live Interactive Preview
+              </button>
+              <button
+                type="button"
+                id="tabPdfBtn"
+                class="preview-tab"
+                role="tab"
+                aria-selected="false"
+                tabindex="-1"
+              >
+                View Exact Generated PDF
+              </button>
+            </div>
+
+            <div class="preview-controls-right">
+              <span id="pageSpecBadge" class="page-spec-pill">8.5" × 14" Legal</span>
+              <label for="previewZoomSelect" class="field-hint">Zoom:</label>
+              <select
+                id="previewZoomSelect"
+                name="preview_zoom"
+                class="ui-select ui-select-compact"
+              >
+                <option value="fit">Fit Height</option>
+                <option value="fit-width">Fit Width</option>
+                <option value="0.75">75%</option>
+                <option value="1">100%</option>
+                <option value="1.25">125%</option>
+              </select>
+            </div>
+          </div>
+
+          <div
+            id="livePanel"
+            class="preview-tabpanel"
+            role="tabpanel"
+            aria-labelledby="tabLiveBtn"
+            tabindex="0"
+          >
+            <div id="liveStage" class="preview-stage">
+              <div id="svgPageWrap" class="svg-page-wrap">
+                <svg
+                  id="proclamationSvg"
+                  xmlns="http://www.w3.org/2000/svg"
+                  role="img"
+                  aria-label="Live proclamation certificate preview"
+                ></svg>
+              </div>
+            </div>
+          </div>
+
+          <div
+            id="pdfPanel"
+            class="preview-tabpanel"
+            role="tabpanel"
+            aria-labelledby="tabPdfBtn"
+            hidden
+          >
+            <div class="pdf-iframe-inner">
+              <iframe id="pdfPreviewFrame" title="Exact Generated Proclamation PDF Document"></iframe>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <!-- Global Window Drag-and-Drop Overlay -->
+    <div id="globalDropOverlay" class="global-drop-overlay hidden" aria-hidden="true">
+      <div class="global-drop-card">
+        <h2>Drop Photo or Draft JSON</h2>
+        <p>Release to insert photo into proclamation (or load a `.json` draft)</p>
+      </div>
+    </div>
+
+    <!-- Classic <script> tags so opening index.html directly via file:// works in every browser -->
+    <script src="vendor/pdf-lib.min.js"></script>
+    <script src="vendor/fontkit.umd.min.js"></script>
+    <script src="js/offline-bundle.js"></script>
+    <script src="js/themes.js"></script>
+    <script src="js/layout.js"></script>
+    <script src="js/pdf-export.js"></script>
+    <script src="js/app.js"></script>
+  </body>
+</html>
